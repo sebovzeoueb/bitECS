@@ -7,6 +7,7 @@ import { $internal } from './World'
 import { createObservable } from './utils/Observer'
 import { EntityId, Prefab } from './Entity'
 import { queryHierarchy, queryHierarchyDepth } from './Hierarchy'
+import { $isPairComponent, $relation, $pairTarget, Wildcard, isWildcard, isRelation } from './Relation'
 
 /**
  * @typedef {Readonly<Uint32Array> | readonly EntityId[]} QueryResult
@@ -40,6 +41,8 @@ export interface QueryOptions {
  * @property {ReturnType<typeof createObservable>} addObservable - Observable for entity additions.
  * @property {ReturnType<typeof createObservable>} removeObservable - Observable for entity removals.
  */
+export type PairFilter = { entity: EntityId } | { relation: ComponentRef } | { relation: ComponentRef, target: any }
+
 export type Query = SparseSet & {
 	allComponents: ComponentRef[]
 	orComponents: ComponentRef[]
@@ -48,11 +51,13 @@ export type Query = SparseSet & {
 	orMasks: Record<number, number>
 	notMasks: Record<number, number>
 	hasMasks: Record<number, number>
+	hasOrTerms: boolean
 	generations: number[]
 	toRemove: SparseSet
 	addObservable: ReturnType<typeof createObservable>
 	removeObservable: ReturnType<typeof createObservable>
 	queues: Record<any, any>
+	pairFilters: PairFilter[]
 }
 
 /**
@@ -208,6 +213,58 @@ export function observe(world: World, hook: ObservableHook, callback: (eid: Enti
 }
 
 /**
+ * Hashes an observer hook for queue caching.
+ */
+const hookHash = (world: World, hook: ObservableHook): string => {
+	const { [$opType]: type, [$opTerms]: components } = hook
+	return `${type}:${queryHash(world, components)}`
+}
+
+/**
+ * Returns the observer queue for a hook, creating and subscribing on first call.
+ */
+const getObserverQueue = (world: World, hook: ObservableHook): EntityId[] => {
+	const ctx = (world as InternalWorld)[$internal]
+	const hash = hookHash(world, hook)
+
+	let buf = ctx.observerQueues.get(hash)
+	if (!buf) {
+		buf = []
+		ctx.observerQueues.set(hash, buf)
+		observe(world, hook, (eid: EntityId) => buf!.push(eid))
+	}
+
+	return buf
+}
+
+/**
+ * Returns entities that matched the observer hook since last drain, then clears the queue.
+ * Auto-registers the observer on first call. Cached by hook type + terms.
+ * @param {World} world - The world object.
+ * @param {ObservableHook} hook - The observer hook (onAdd, onRemove, onSet, onGet).
+ * @returns {EntityId[]} Array of entity IDs accumulated since last drain.
+ */
+export const queueDrain = (world: World, hook: ObservableHook): EntityId[] => {
+	const buf = getObserverQueue(world, hook)
+	const result = buf.slice()
+	buf.length = 0
+	return result
+}
+
+/**
+ * Returns entities that matched the observer hook since last drain WITHOUT clearing the queue.
+ * @param {World} world - The world object.
+ * @param {ObservableHook} hook - The observer hook (onAdd, onRemove, onSet, onGet).
+ * @returns {EntityId[]} Array of entity IDs accumulated since last drain.
+ */
+export const queuePeek = (world: World, hook: ObservableHook): EntityId[] => {
+	return getObserverQueue(world, hook).slice()
+}
+
+export const queue = queueDrain
+export const peek = queuePeek
+
+/**
  * @function queryHash
  * @description Generates a hash for a query based on its terms.
  * @param {World} world - The world object.
@@ -220,9 +277,32 @@ export const queryHash = (world: World, terms: QueryTerm[]): string => {
 		if (!ctx.componentMap.has(component)) registerComponent(world, component)
 		return ctx.componentMap.get(component)!.id
 	}
-	const termToString = (term: QueryTerm): string => 
-		$opType in term ? `${term[$opType].toLowerCase()}(${term[$opTerms].map(termToString).sort().join(',')})` : getComponentId(term).toString()
-	
+	const termToString = (term: QueryTerm): string => {
+		if (typeof term === 'object' && term !== null && $opType in term) {
+			return `${term[$opType].toLowerCase()}(${term[$opTerms].map(termToString).sort().join(',')})`
+		}
+		if (term[$isPairComponent]) {
+			const relation = term[$relation]
+			const target = term[$pairTarget]
+			if (isWildcard(relation)) {
+				// Wildcard(X) — hash by target identity
+				if (typeof target === 'number') return `w(e${target})`
+				if (isRelation(target)) {
+					if (!ctx.componentMap.has(target)) registerComponent(world, target)
+					return `w(r${ctx.componentMap.get(target)!.id})`
+				}
+				return `w(?)`
+			}
+			if (target === Wildcard) {
+				// Relation(Wildcard) — same hash as bare relation
+				return getComponentId(relation).toString()
+			}
+			// Relation(specificTarget) — hash includes target
+			return `p(${getComponentId(relation)},${target})`
+		}
+		return getComponentId(term).toString()
+	}
+
 	return terms.map(termToString).sort().join('-')
 }
 
@@ -239,73 +319,140 @@ export const registerQuery = (world: World, terms: QueryTerm[], options: { buffe
 	const ctx = (world as InternalWorld)[$internal]
 	const hash = queryHash(world, terms)
 
+	const isOp = (term: QueryTerm): term is OpReturnType =>
+		typeof term === 'object' && term !== null && $opType in term
+
+	const pairFilters: PairFilter[] = []
+
+	// Unwrap pair terms: Wildcard pairs use indexes, Relation(Wildcard) uses relation bitflag,
+	// specific pairs (Relation(target)) use their own bitflag — no unwrapping needed.
+	const unwrapTerm = (term: ComponentRef): ComponentRef => {
+		if (term[$isPairComponent]) {
+			const relation = term[$relation]
+			const target = term[$pairTarget]
+			if (isWildcard(relation)) {
+				if (typeof target === 'number') pairFilters.push({ entity: target })
+				else if (isRelation(target)) pairFilters.push({ relation: target })
+				return null as any
+			}
+			if (target === Wildcard) {
+				if (!ctx.componentMap.has(relation)) registerComponent(world, relation)
+				return relation
+			}
+			// Specific pair: use relation bitflag + pair filter
+			if (!ctx.componentMap.has(relation)) registerComponent(world, relation)
+			pairFilters.push({ relation, target })
+			return relation
+		}
+		return term
+	}
+
 	const queryComponents: ComponentRef[] = []
 	const collect = (term: QueryTerm) => {
-		if ($opType in term) term[$opTerms].forEach(collect)
-		else {
-			if (!ctx.componentMap.has(term)) registerComponent(world, term)
-			queryComponents.push(term)
+		if (isOp(term)) {
+			const opTerms = term[$opTerms]
+			for (let j = 0; j < opTerms.length; j++) collect(opTerms[j])
+		} else {
+			const unwrapped = unwrapTerm(term)
+			if (unwrapped === null) return // wildcard filter, no bitmask
+			if (!ctx.componentMap.has(unwrapped)) registerComponent(world, unwrapped)
+			queryComponents.push(unwrapped)
 		}
 	}
-	terms.forEach(collect)
-	
-	// Use original simple approach for blazing-fast simple queries
-	// TODO: Add nested combinator support later if needed
+	for (let i = 0; i < terms.length; i++) collect(terms[i])
+
 	const components: ComponentRef[] = []
 	const notComponents: ComponentRef[] = []
 	const orComponents: ComponentRef[] = []
 
 	const addToArray = (arr: ComponentRef[], comps: ComponentRef[]) => {
-		comps.forEach(comp => {
-			if (!ctx.componentMap.has(comp)) registerComponent(world, comp)
-			arr.push(comp)
-		})
+		for (let j = 0; j < comps.length; j++) {
+			const unwrapped = unwrapTerm(comps[j])
+			if (unwrapped === null) continue
+			if (!ctx.componentMap.has(unwrapped)) registerComponent(world, unwrapped)
+			arr.push(unwrapped)
+		}
 	}
-	
-	terms.forEach(term => {
-		if ($opType in term) {
+
+	for (let i = 0; i < terms.length; i++) {
+		const term = terms[i]
+		if (isOp(term)) {
 			const { [$opType]: type, [$opTerms]: comps } = term
 			if (type === 'Not') addToArray(notComponents, comps)
 			else if (type === 'Or') addToArray(orComponents, comps)
 			else if (type === 'And') addToArray(components, comps)
 			else throw new Error(`Nested combinator ${type} not supported yet - use simple queries for best performance`)
 		} else {
-			if (!ctx.componentMap.has(term)) registerComponent(world, term)
-			components.push(term)
+			const unwrapped = unwrapTerm(term)
+			if (unwrapped === null) continue
+			if (!ctx.componentMap.has(unwrapped)) registerComponent(world, unwrapped)
+			components.push(unwrapped)
 		}
-	})
+	}
 
 	const allComponentsData = queryComponents.map(c => ctx.componentMap.get(c)!)
-	const generations = [...new Set(allComponentsData.map(c => c.generationId))]
+	const generations = allComponentsData.length > 0
+		? [...new Set(allComponentsData.map(c => c.generationId))]
+		: []
 	const reduceBitflags = (a: Record<number, number>, c: ComponentData) => (a[c.generationId] = (a[c.generationId] || 0) | c.bitflag, a)
-	
+
 	const masks = components.map(c => ctx.componentMap.get(c)!).reduce(reduceBitflags, {})
 	const notMasks = notComponents.map(c => ctx.componentMap.get(c)!).reduce(reduceBitflags, {})
 	const orMasks = orComponents.map(c => ctx.componentMap.get(c)!).reduce(reduceBitflags, {})
 	const hasMasks = allComponentsData.reduce(reduceBitflags, {})
 
+	const hasOrTerms = orComponents.length > 0
+
 	const query = Object.assign(options.buffered ? createUint32SparseSet() : createSparseSet(), {
-		allComponents: queryComponents, orComponents, notComponents, masks, notMasks, orMasks, hasMasks, generations,
-		toRemove: createSparseSet(), addObservable: createObservable(), removeObservable: createObservable(), queues: {}
+		allComponents: queryComponents, orComponents, notComponents, masks, notMasks, orMasks, hasMasks, hasOrTerms, generations,
+		toRemove: createSparseSet(), addObservable: createObservable(), removeObservable: createObservable(), queues: {},
+		pairFilters
 	}) as Query
 
 	ctx.queries.add(query)
 
 	ctx.queriesHashMap.set(hash, query)
 
-	allComponentsData.forEach((c) => {
-		c.queries.add(query)
-	})
+	for (let i = 0; i < allComponentsData.length; i++) {
+		allComponentsData[i].queries.add(query)
+	}
 
 	if (notComponents.length) ctx.notQueries.add(query)
 
-	const entityIndex = ctx.entityIndex
-	for (let i = 0; i < entityIndex.aliveCount; i++) {
-		const eid = entityIndex.dense[i]
-		if (hasComponent(world, eid, Prefab)) continue
-		const match = queryCheckEntity(world, query, eid)
-		if (match) {
-			queryAddEntity(query, eid)
+	// Invalidate archetype graph — new query changes transition results
+	ctx.rootArchetype = { edges: [] }
+	ctx.entityArchetypes = []
+
+	// Populate initial query membership
+	if (pairFilters.length > 0 && queryComponents.length === 0) {
+		// Pure wildcard query — resolve from indexes
+		for (const filter of pairFilters) {
+			if ('entity' in filter) {
+				// Wildcard(entity) — collect all targets of entity's relations
+				const relTargets = ctx.relationTargets[filter.entity]
+				if (relTargets) {
+					for (const [, targets] of relTargets) {
+						for (const t of targets) queryAddEntity(query, t)
+					}
+				}
+			} else {
+				// Pair(Wildcard, Relation) — collect all entities targeted via this relation
+				const targetSet = ctx.targetsByRelation.get(filter.relation)
+				if (targetSet) {
+					for (const eid of targetSet) queryAddEntity(query, eid)
+				}
+			}
+		}
+	} else {
+		// Standard bitmask-based initial population
+		const entityIndex = ctx.entityIndex
+		for (let i = 0; i < entityIndex.aliveCount; i++) {
+			const eid = entityIndex.dense[i]
+			if (hasComponent(world, eid, Prefab)) continue
+			const match = queryCheckEntity(world, query, eid)
+			if (match) {
+				queryAddEntity(query, eid)
+			}
 		}
 	}
 
@@ -346,11 +493,10 @@ export function queryInternal(world: World, terms: QueryTerm[], options: { buffe
  */
 export function query(world: World, terms: QueryTerm[], ...modifiers: (QueryModifier | QueryOptions)[]): QueryResult {
 	const hierarchyTerm = terms.find(term => term && typeof term === 'object' && $hierarchyType in term) as HierarchyTerm | undefined
-	const regularTerms = terms.filter(term => !(term && typeof term === 'object' && $hierarchyType in term))
-	
+
 	let buffered = false, commit = true
 	const hasModifiers = modifiers.some(m => m && typeof m === 'object' && $modifierType in m)
-	
+
 	for (const modifier of modifiers) {
 		if (hasModifiers && modifier && typeof modifier === 'object' && $modifierType in modifier) {
 			const mod = modifier as QueryModifier
@@ -364,12 +510,13 @@ export function query(world: World, terms: QueryTerm[], ...modifiers: (QueryModi
 	}
 
 	if (hierarchyTerm) {
+		const regularTerms = terms.filter(term => !(term && typeof term === 'object' && $hierarchyType in term))
 		const { [$hierarchyRel]: relation, [$hierarchyDepth]: depth } = hierarchyTerm
 		return depth !== undefined ? queryHierarchyDepth(world, relation, depth, { buffered }) : queryHierarchy(world, relation, regularTerms, { buffered })
 	}
 
 	if (commit) commitRemovals(world)
-	return queryInternal(world, regularTerms, { buffered })
+	return queryInternal(world, terms, { buffered })
 }
 
 
@@ -384,9 +531,10 @@ export function query(world: World, terms: QueryTerm[], ...modifiers: (QueryModi
  */
 export function queryCheckEntity(world: World, query: Query, eid: EntityId): boolean {
 	const ctx = (world as InternalWorld)[$internal]
-	const { masks, notMasks, orMasks, generations } = query
+	const { masks, notMasks, orMasks, hasOrTerms, generations, pairFilters } = query
 
-	let hasOrMatch = Object.keys(orMasks).length === 0
+	// Bitmask evaluation — handles regular components, specific pairs, and Relation(Wildcard)
+	let hasOrMatch = !hasOrTerms
 
 	for (let i = 0; i < generations.length; i++) {
 		const generationId = generations[i]
@@ -395,20 +543,46 @@ export function queryCheckEntity(world: World, query: Query, eid: EntityId): boo
 		const qOrMask = orMasks[generationId]
 		const eMask = ctx.entityMasks[generationId][eid]
 
-		if (qNotMask && (eMask & qNotMask) !== 0) {
-			return false
-		}
+		if (qNotMask && (eMask & qNotMask) !== 0) return false
+		if (qMask && (eMask & qMask) !== qMask) return false
+		if (qOrMask && (eMask & qOrMask) !== 0) hasOrMatch = true
+	}
 
-		if (qMask && (eMask & qMask) !== qMask) {
-			return false
-		}
+	if (!hasOrMatch) return false
 
-		if (qOrMask && (eMask & qOrMask) !== 0) {
-			hasOrMatch = true
+	// Pair filters — queries that can't use bitmasks alone
+	if (pairFilters.length > 0) {
+		for (let i = 0; i < pairFilters.length; i++) {
+			const filter = pairFilters[i]
+			// Specific pair: Relation(target)
+			if ('target' in filter) {
+				const targets = ctx.relationTargets[eid]?.get(filter.relation)
+				if (!targets || !targets.has(filter.target)) return false
+			}
+			// Wildcard(entity)
+			else if ('entity' in filter) {
+				const relTargets = ctx.relationTargets[eid]
+				if (!relTargets) return false
+				let found = false
+				for (const [, targets] of relTargets) {
+					if (targets.has(filter.entity)) { found = true; break }
+				}
+				if (!found) return false
+			}
+			// Pair(Wildcard, Relation)
+			else {
+				const rev = ctx.reverseIndex[eid]
+				if (!rev) return false
+				let found = false
+				for (let j = 0; j < rev.length; j++) {
+					if (rev[j].relation === filter.relation) { found = true; break }
+				}
+				if (!found) return false
+			}
 		}
 	}
 
-	return hasOrMatch
+	return true
 }
 
 
@@ -473,7 +647,7 @@ const queryCommitRemovals = (query: Query) => {
 export const commitRemovals = (world: World) => {
 	const ctx = (world as InternalWorld)[$internal]
 	if (!ctx.dirtyQueries.size) return
-	ctx.dirtyQueries.forEach(queryCommitRemovals)
+	for (const q of ctx.dirtyQueries) queryCommitRemovals(q)
 	ctx.dirtyQueries.clear()
 }
 
@@ -506,5 +680,7 @@ export const removeQuery = (world: World, terms: QueryTerm[]) => {
 	if (query) {
 		ctx.queries.delete(query)
 		ctx.queriesHashMap.delete(hash)
+		ctx.rootArchetype = { edges: [] }
+		ctx.entityArchetypes = []
 	}
 }

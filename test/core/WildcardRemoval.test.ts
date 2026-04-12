@@ -11,26 +11,10 @@ import {
   getEntityComponents,
   query,
   withStore,
-  getRelationTargets,
-  World,
-  EntityId,
 } from "../../src/core";
 
-// Helper function to remove all relations of a specific type from an entity
-// This is what we would need since BitECS doesn't natively support wildcard removal like Flecs
-const removeAllRelationsOfType = (
-  world: World,
-  eid: EntityId,
-  relation: any,
-) => {
-  const targets = getRelationTargets(world, eid, relation);
-  for (const target of targets) {
-    removeComponent(world, eid, relation(target));
-  }
-};
-
 describe("Wildcard Relation Removal Tests", () => {
-  test("BitECS does NOT natively support wildcard removal like Flecs", () => {
+  test("should natively support wildcard removal (Flecs-style)", () => {
     const world = createWorld();
     const Targeting = createRelation();
 
@@ -50,17 +34,17 @@ describe("Wildcard Relation Removal Tests", () => {
     expect(hasComponent(world, hero, Targeting(orc))).toBe(true);
     expect(hasComponent(world, hero, Targeting(Wildcard))).toBe(true);
 
-    // Try to remove all Targeting relations using wildcard (this WON'T work in BitECS)
+    // Remove all Targeting relations using wildcard — now works natively!
     removeComponent(world, hero, Targeting(Wildcard));
 
-    // BitECS only removes the specific Wildcard component, not all relations of that type
-    expect(hasComponent(world, hero, Targeting(rat))).toBe(true); // Still there!
-    expect(hasComponent(world, hero, Targeting(goblin))).toBe(true); // Still there!
-    expect(hasComponent(world, hero, Targeting(orc))).toBe(true); // Still there!
-    expect(hasComponent(world, hero, Targeting(Wildcard))).toBe(false); // Only this is removed
+    // All specific relations should be removed
+    expect(hasComponent(world, hero, Targeting(rat))).toBe(false);
+    expect(hasComponent(world, hero, Targeting(goblin))).toBe(false);
+    expect(hasComponent(world, hero, Targeting(orc))).toBe(false);
+    expect(hasComponent(world, hero, Targeting(Wildcard))).toBe(false);
   });
 
-  test("Pair(Relation, Wildcard) also doesn't work for wildcard removal", () => {
+  test("Pair(Relation, Wildcard) should also work for wildcard removal", () => {
     const world = createWorld();
     const ChildOf = createRelation();
 
@@ -77,13 +61,13 @@ describe("Wildcard Relation Removal Tests", () => {
     expect(hasComponent(world, child, ChildOf(parent2))).toBe(true);
     expect(hasComponent(world, child, Pair(ChildOf, Wildcard))).toBe(true);
 
-    // Try to remove all ChildOf relations using Pair syntax (this also WON'T work)
+    // Remove all ChildOf relations using Pair syntax
     removeComponent(world, child, Pair(ChildOf, Wildcard));
 
-    // Only the wildcard pair component itself is removed, not the specific relations
-    expect(hasComponent(world, child, ChildOf(parent1))).toBe(true); // Still there!
-    expect(hasComponent(world, child, ChildOf(parent2))).toBe(true); // Still there!
-    expect(hasComponent(world, child, Pair(ChildOf, Wildcard))).toBe(false); // Only this is removed
+    // All relations should be removed
+    expect(hasComponent(world, child, ChildOf(parent1))).toBe(false);
+    expect(hasComponent(world, child, ChildOf(parent2))).toBe(false);
+    expect(hasComponent(world, child, Pair(ChildOf, Wildcard))).toBe(false);
   });
 
   test("helper function CAN achieve wildcard removal behavior", () => {
@@ -114,8 +98,8 @@ describe("Wildcard Relation Removal Tests", () => {
     expect(Contains(silver).amount[inventory]).toBe(50);
     expect(Contains(bronze).amount[inventory]).toBe(25);
 
-    // Remove all Contains relations using our helper function
-    removeAllRelationsOfType(world, inventory, Contains);
+    // Remove all Contains relations using wildcard
+    removeComponent(world, inventory, Contains(Wildcard));
 
     // Verify all relations are removed
     expect(hasComponent(world, inventory, Contains(gold))).toBe(false);
@@ -149,8 +133,8 @@ describe("Wildcard Relation Removal Tests", () => {
     removeComponent(world, person1, Likes(ice_cream));
     removeComponent(world, person1, Likes(chocolate));
 
-    // Helper function removal
-    removeAllRelationsOfType(world, person2, Likes);
+    // Wildcard removal
+    removeComponent(world, person2, Likes(Wildcard));
 
     // Both should have identical results
     expect(hasComponent(world, person1, Likes(Wildcard))).toBe(false);
@@ -191,8 +175,8 @@ describe("Wildcard Relation Removal Tests", () => {
     expect(hasComponent(world, hero, Targeting(enemy1))).toBe(false);
     expect(hasComponent(world, hero, Targeting(enemy2))).toBe(true);
 
-    // Remove all targeting using helper function
-    removeAllRelationsOfType(world, hero, Targeting);
+    // Remove all targeting using wildcard
+    removeComponent(world, hero, Targeting(Wildcard));
 
     // Should remove the exclusive relation
     expect(hasComponent(world, hero, Targeting(enemy2))).toBe(false);
@@ -205,9 +189,9 @@ describe("Wildcard Relation Removal Tests", () => {
 
     const entity = addEntity(world);
 
-    // Try to remove relations that don't exist using helper function
+    // Try to remove relations that don't exist using wildcard
     expect(() => {
-      removeAllRelationsOfType(world, entity, SomeRelation);
+      removeComponent(world, entity, SomeRelation(Wildcard));
     }).not.toThrow();
 
     // Entity should still exist and be unaffected
@@ -231,19 +215,20 @@ describe("Wildcard Relation Removal Tests", () => {
     expect(allConnected.length).toBe(1);
     expect(allConnected).toContain(node1);
 
-    // Query for entities that are targets of ConnectedTo relations
-    let allTargets = query(world, [Wildcard(node2)]);
-    expect(allTargets.length).toBe(1);
-    expect(allTargets).toContain(node1);
+    // Query for entities that are targets of node1's relations
+    let allTargets = query(world, [Wildcard(node1)]);
+    expect(allTargets.length).toBe(2);
+    expect(allTargets).toContain(node2);
+    expect(allTargets).toContain(node3);
 
-    // Remove all ConnectedTo relations from node1 using helper function
-    removeAllRelationsOfType(world, node1, ConnectedTo);
+    // Remove all ConnectedTo relations from node1 using wildcard removal
+    removeComponent(world, node1, ConnectedTo(Wildcard));
 
     // Queries should now return empty results
     allConnected = query(world, [ConnectedTo(Wildcard)]);
     expect(allConnected.length).toBe(0);
 
-    allTargets = query(world, [Wildcard(node2)]);
+    allTargets = query(world, [Wildcard(node1)]);
     expect(allTargets.length).toBe(0);
   });
 
@@ -260,8 +245,8 @@ describe("Wildcard Relation Removal Tests", () => {
     addComponent(world, person, Likes(pizza));
     addComponent(world, person, Owns(car));
 
-    // Remove only Likes relations using helper function
-    removeAllRelationsOfType(world, person, Likes);
+    // Remove only Likes relations using wildcard
+    removeComponent(world, person, Likes(Wildcard));
 
     // Only Likes should be removed, Owns should remain
     expect(hasComponent(world, person, Likes(pizza))).toBe(false);
@@ -270,7 +255,7 @@ describe("Wildcard Relation Removal Tests", () => {
     expect(hasComponent(world, person, Owns(Wildcard))).toBe(true);
   });
 
-  test("native BitECS behavior: removing Wildcard component only removes that specific component", () => {
+  test("native wildcard removal removes all targets", () => {
     const world = createWorld();
     const Targeting = createRelation();
 
@@ -282,19 +267,18 @@ describe("Wildcard Relation Removal Tests", () => {
     addComponent(world, hero, Targeting(rat));
     addComponent(world, hero, Targeting(goblin));
 
-    // The wildcard component is automatically added when we add specific relations
+    // The wildcard check reflects relation existence
     expect(hasComponent(world, hero, Targeting(Wildcard))).toBe(true);
 
-    // Remove the wildcard component specifically
+    // Wildcard removal now removes all targets (Flecs-style)
     removeComponent(world, hero, Targeting(Wildcard));
 
-    // Only the wildcard component is removed, specific relations remain
     expect(hasComponent(world, hero, Targeting(Wildcard))).toBe(false);
-    expect(hasComponent(world, hero, Targeting(rat))).toBe(true);
-    expect(hasComponent(world, hero, Targeting(goblin))).toBe(true);
+    expect(hasComponent(world, hero, Targeting(rat))).toBe(false);
+    expect(hasComponent(world, hero, Targeting(goblin))).toBe(false);
   });
 
-  test("demonstration: what Flecs-style wildcard removal would look like", () => {
+  test("demonstration: Flecs-style wildcard removal works natively", () => {
     const world = createWorld();
     const Targeting = createRelation();
 
@@ -307,11 +291,10 @@ describe("Wildcard Relation Removal Tests", () => {
     addComponent(world, hero, Targeting(goblin));
     addComponent(world, hero, Targeting(orc));
 
-    // In Flecs C, this would be: ecs_remove_id(world, hero, ecs_pair(Targeting, EcsWildcard));
-    // In BitECS, we need our helper function to achieve the same result
-    removeAllRelationsOfType(world, hero, Targeting);
+    // Flecs-style wildcard removal now works natively
+    removeComponent(world, hero, Targeting(Wildcard));
 
-    // All specific relations should be removed (Flecs-like behavior achieved)
+    // All specific relations should be removed
     expect(hasComponent(world, hero, Targeting(rat))).toBe(false);
     expect(hasComponent(world, hero, Targeting(goblin))).toBe(false);
     expect(hasComponent(world, hero, Targeting(orc))).toBe(false);

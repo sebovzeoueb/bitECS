@@ -1,12 +1,10 @@
-import { addComponent, removeComponent, addComponents } from './Component'
+import { addComponent, addComponents, removeComponent } from './Component'
 import {
-	query,
-	noCommit,
 	queryAddEntity,
 	queryCheckEntity,
 	queryRemoveEntity,
 } from './Query'
-import { Pair, Wildcard, $isPairComponent, $relation, $pairTarget, $relationData } from './Relation'
+import { $isPairComponent, $relation, $relationData } from './Relation'
 import { World } from "./World"
 import { InternalWorld } from './World'
 import { addEntityId, isEntityIdAlive, removeEntityId } from './EntityIndex'
@@ -25,9 +23,7 @@ export const Prefab = {}
  */
 export const addPrefab = (world: World): EntityId => {
 	const eid = addEntity(world)
-
 	addComponent(world, eid, Prefab)
-
 	return eid
 }
 
@@ -43,15 +39,15 @@ export function addEntity(world: World, ...components: any[]): EntityId {
 	const ctx = (world as InternalWorld)[$internal]
 	const eid = addEntityId(ctx.entityIndex)
 
-	ctx.notQueries.forEach((q) => {
-		const match = queryCheckEntity(world, q, eid)
-		if (match) queryAddEntity(q, eid)
-	})
+	for (const q of ctx.notQueries) {
+		if (queryCheckEntity(world, q, eid)) queryAddEntity(q, eid)
+	}
 
-	ctx.entityComponents.set(eid, new Set())
+	ctx.entityComponents[eid] = []
+	ctx.entityArchetypes[eid] = ctx.rootArchetype
 
 	if (components.length > 0) {
-		addComponents(world, eid, components as any)
+		addComponents(world, eid, components)
 	}
 
 	return eid
@@ -63,7 +59,6 @@ export function addEntity(world: World, ...components: any[]): EntityId {
  * @param {World} world
  * @param {number} eid
  */
-
 export const removeEntity = (world: World, eid: EntityId) => {
 	const ctx = (world as InternalWorld)[$internal]
 	// Check if entity is already removed
@@ -73,63 +68,81 @@ export const removeEntity = (world: World, eid: EntityId) => {
 	// e.g. addComponent(world, child, ChildOf(parent))
 	// when parent is removed, we need to remove the child
 	const removalQueue = [eid]
-	const processedEntities = new Set()
-    while (removalQueue.length > 0) {
-        
-		const currentEid = removalQueue.shift()!
-        if (processedEntities.has(currentEid)) continue
-        processedEntities.add(currentEid)
+	let queueIdx = 0
+	const processedEntities = new Set<EntityId>()
 
-        const componentRemovalQueue = []
+	while (queueIdx < removalQueue.length) {
+		const currentEid = removalQueue[queueIdx++]
+		if (processedEntities.has(currentEid)) continue
+		processedEntities.add(currentEid)
 
-		if (ctx.entitiesWithRelations.has(currentEid)) {
-			for (const subject of query(world, [Wildcard(currentEid)], noCommit)) {
-				if (!entityExists(world, subject)) {
-					continue
+		// Handle relation cascade removal via reverse index
+		const reverseEntries = ctx.reverseIndex[currentEid]
+		if (reverseEntries && reverseEntries.length > 0) {
+			const deferredOps: (() => void)[] = []
+
+			// Copy entries since removeComponent will mutate the array
+			const entries = reverseEntries.slice()
+			for (let i = 0; i < entries.length; i++) {
+				const { subject, relation } = entries[i]
+				if (!isEntityIdAlive(ctx.entityIndex, subject)) continue
+
+				const relationData = relation[$relationData]
+				const pairComponent = relation(currentEid)
+
+				deferredOps.push(() => removeComponent(world, subject, pairComponent))
+				if (relationData.autoRemoveSubject) removalQueue.push(subject)
+				if (relationData.onTargetRemoved) {
+					deferredOps.push(() => relationData.onTargetRemoved(world, subject, currentEid))
 				}
+			}
 
-				for (const component of ctx.entityComponents.get(subject)!) {
-					if (!component[$isPairComponent]) {
-						continue
+			for (let i = 0; i < deferredOps.length; i++) deferredOps[i]()
+		}
+
+		// Remove entity from affected queries (via entity's component set)
+		const components = ctx.entityComponents[currentEid]
+		if (components) {
+			const visited = new Set<any>()
+			for (let i = 0; i < components.length; i++) {
+				const comp = components[i]
+				// Pairs and regular components are both in componentMap now
+				const compData = ctx.componentMap.get(comp)
+				if (compData) {
+					for (const q of compData.queries) {
+						if (!visited.has(q)) { visited.add(q); queryRemoveEntity(world, q, currentEid) }
 					}
-
-					const relation = component[$relation]
-					const relationData = relation[$relationData]
-					componentRemovalQueue.push(() => removeComponent(world, subject, Pair(Wildcard, currentEid)))
-
-					if (component[$pairTarget] === currentEid) {
-						componentRemovalQueue.push(() => removeComponent(world, subject, component))
-						if (relationData.autoRemoveSubject) {
-							removalQueue.push(subject)
-						}
-						if (relationData.onTargetRemoved) {
-							componentRemovalQueue.push(() => relationData.onTargetRemoved(world, subject, currentEid))
+				}
+				// For pairs, also check the relation's queries (for Relation(Wildcard) queries)
+				if (comp[$isPairComponent]) {
+					const relData = ctx.componentMap.get(comp[$relation])
+					if (relData) {
+						for (const q of relData.queries) {
+							if (!visited.has(q)) { visited.add(q); queryRemoveEntity(world, q, currentEid) }
 						}
 					}
 				}
 			}
-
-			ctx.entitiesWithRelations.delete(currentEid)
+			// Wildcard queries can't be found via component lookup
+			for (const q of ctx.queries) {
+				if (q.pairFilters.length > 0 && !visited.has(q)) {
+					queryRemoveEntity(world, q, currentEid)
+				}
+			}
 		}
-
-        for (const removeOperation of componentRemovalQueue) {
-            removeOperation()
-        }
-
-		for (const eid of removalQueue) {
-			removeEntity(world, eid)
-		}
-
-		// Remove entity from all queries
-		for (const query of ctx.queries) {
-			queryRemoveEntity(world, query, currentEid)
+		// Also check notQueries (entity may match queries with only Not terms)
+		for (const q of ctx.notQueries) {
+			queryRemoveEntity(world, q, currentEid)
 		}
 
 		// Free the entity ID
 		removeEntityId(ctx.entityIndex, currentEid)
 
 		// Remove all entity state from world
-		ctx.entityComponents.delete(currentEid)
+		ctx.entityComponents[currentEid] = null as any
+		ctx.entityArchetypes[currentEid] = null as any
+		ctx.relationTargets[currentEid] = null
+		ctx.reverseIndex[currentEid] = null
 
 		// Clear entity bitmasks
 		for (let i = 0; i < ctx.entityMasks.length; i++) {
@@ -149,7 +162,8 @@ export const getEntityComponents = (world: World, eid: EntityId): ComponentRef[]
 	if (eid === undefined) throw new Error(`getEntityComponents: entity id is undefined.`)
 	if (!isEntityIdAlive(ctx.entityIndex, eid))
 		throw new Error(`getEntityComponents: entity ${eid} does not exist in the world.`)
-	return Array.from(ctx.entityComponents.get(eid)!)
+	const components = ctx.entityComponents[eid]
+	return components ? components.slice() : []
 }
 
 /**
@@ -158,4 +172,5 @@ export const getEntityComponents = (world: World, eid: EntityId): ComponentRef[]
  * @param {World} world
  * @param {number} eid
  */
-export const entityExists = (world: World, eid: EntityId) => isEntityIdAlive((world as InternalWorld)[$internal].entityIndex, eid)
+export const entityExists = (world: World, eid: EntityId) =>
+	isEntityIdAlive((world as InternalWorld)[$internal].entityIndex, eid)

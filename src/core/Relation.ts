@@ -1,5 +1,6 @@
-import { getEntityComponents, World } from '.'
+import { World } from '.'
 import { EntityId } from './Entity'
+import { $internal, InternalWorld } from './World'
 import { defineHiddenProperty } from './utils/defineHiddenProperty'
 
 /**
@@ -141,24 +142,6 @@ export const withOnTargetRemoved = <T>(onRemove: OnTargetRemovedCallback) => (re
     return relation
 }
 
-// TODO: withSetter
-/**
- * Adds validation to a relation.
- * @template T
- * @param {function(T): boolean} validateFn - The validation function.
- * @returns {function(Relation<T>): Relation<T>} A function that modifies the relation.
- */
-const withValidation = <T>(validateFn: (value: T) => boolean) => (relation: Relation<T>): Relation<T> => {
-    const originalRelation = relation
-    return ((target: RelationTarget): T => {
-        const component = originalRelation(target)
-        if (!validateFn(component)) {
-            throw new Error('Validation failed for relation component')
-        }
-        return component
-    }) as Relation<T>
-}
-
 /**
  * Creates a pair from a relation and a target.
  * @template T
@@ -180,14 +163,9 @@ export const Pair = <T>(relation: Relation<T>, target: RelationTarget): T => {
  * @returns {Array<any>} An array of relation targets.
  */
 export const getRelationTargets = (world: World, eid: EntityId, relation: Relation<any>): number[] => {
-	const components = getEntityComponents(world, eid)
-	const targets = []
-	for (const c of components) {
-		if (c[$relation] === relation && c[$pairTarget] !== Wildcard && !isRelation(c[$pairTarget])) {
-			targets.push(c[$pairTarget])
-		}
-	}
-	return targets
+	const ctx = (world as InternalWorld)[$internal]
+	const targets = ctx.relationTargets[eid]?.get(relation)
+	return targets ? Array.from(targets) : []
 }
 
 /**
@@ -243,69 +221,29 @@ export function createRelation<T>(
 export const $wildcard = Symbol.for('bitecs-wildcard')
 
 /**
- * Creates a wildcard relation that matches any target.
- * @template T
- * @returns {Relation<T>} The created wildcard relation.
+ * Gets or creates a global singleton relation by symbol key.
  */
-export function createWildcardRelation<T>(): Relation<T> {
-    const relation = createBaseRelation<T>()
-    Object.defineProperty(relation, $wildcard, {
-        value: true,
-        enumerable: false,
-        writable: false,
-        configurable: false
-    })
+const getGlobalRelation = (key: string, init: () => any) => {
+    const sym = Symbol.for(key)
+    if (!(globalThis as any)[sym]) (globalThis as any)[sym] = init()
+    return (globalThis as any)[sym]
+}
+
+/**
+ * Wildcard relation — matches any target in queries and hasComponent checks.
+ * @type {Relation<any>}
+ */
+export const Wildcard: Relation<any> = getGlobalRelation('bitecs-global-wildcard', () => {
+    const relation = createBaseRelation()
+    Object.defineProperty(relation, $wildcard, { value: true, enumerable: false, writable: false, configurable: false })
     return relation
-}
+})
 
 /**
- * Gets the singleton wildcard instance.
- * @returns {Relation<any>} The global wildcard relation instance.
- */
-export function getWildcard(): Relation<any> {
-    const GLOBAL_WILDCARD = Symbol.for('bitecs-global-wildcard')
-    
-    if (!(globalThis as any)[GLOBAL_WILDCARD]) {
-        (globalThis as any)[GLOBAL_WILDCARD] = createWildcardRelation()
-    }
-    
-    return (globalThis as any)[GLOBAL_WILDCARD]
-}
-
-/**
- * Wildcard relation.
+ * IsA relation — used for component inheritance between entities.
  * @type {Relation<any>}
  */
-export const Wildcard = getWildcard()
-
-/**
- * Creates an IsA relation.
- * @template T
- * @returns {Relation<T>} The created IsA relation.
- */
-export function createIsARelation<T>(): Relation<T> {
-    return createBaseRelation<T>()
-}
-
-/**
- * Gets the singleton IsA instance.
- * @returns {Relation<any>} The global IsA relation instance.
- */
-export function getIsA(): Relation<any> {
-    const GLOBAL_ISA = Symbol.for('bitecs-global-isa')
-    
-    if (!(globalThis as any)[GLOBAL_ISA]) {
-        (globalThis as any)[GLOBAL_ISA] = createIsARelation()
-    }
-    
-    return (globalThis as any)[GLOBAL_ISA]
-}
-
-/**
- * IsA relation.
- * @type {Relation<any>}
- */
-export const IsA = getIsA()
+export const IsA: Relation<any> = getGlobalRelation('bitecs-global-isa', createBaseRelation)
 
 /**
  * Checks if a relation is a wildcard relation.
@@ -313,9 +251,7 @@ export const IsA = getIsA()
  * @returns {boolean} True if the relation is a wildcard relation, false otherwise.
  */
 export function isWildcard(relation: any): boolean {
-    if (!relation) return false
-    const symbols = Object.getOwnPropertySymbols(relation)
-    return symbols.includes($wildcard)
+    return relation ? relation[$wildcard] === true : false
 }
 
 /**
@@ -324,7 +260,5 @@ export function isWildcard(relation: any): boolean {
  * @returns {boolean} True if the component is a relation, false otherwise.
  */
 export function isRelation(component: any): boolean {
-    if (!component) return false
-    const symbols = Object.getOwnPropertySymbols(component)
-    return symbols.includes($relationData)
+    return component ? component[$relationData] !== undefined : false
 }

@@ -58,6 +58,8 @@ export const createUint32SparseSet = (initialCapacity: number = 1000): SparseSet
 	const sparse: number[] = []
 	let length = 0
 	let dense: Uint32Array = new Uint32Array(new SharedArrayBufferOrArrayBuffer(initialCapacity * 4))
+	let cachedView: Uint32Array = new Uint32Array(dense.buffer, 0, 0)
+	let viewDirty = true
 
 	const has = (val: number) => val < sparse.length && sparse[val] < length && dense[sparse[val]] === val
 
@@ -71,6 +73,7 @@ export const createUint32SparseSet = (initialCapacity: number = 1000): SparseSet
 		dense[length] = val
 		sparse[val] = length
 		length++
+		viewDirty = true
 	}
 
 	const remove = (val: number) => {
@@ -80,27 +83,30 @@ export const createUint32SparseSet = (initialCapacity: number = 1000): SparseSet
 		const swapped = dense[length]
 		dense[index] = swapped
 		sparse[swapped] = index
+		viewDirty = true
 	}
 
 	const reset = () => {
 		length = 0
 		sparse.length = 0
+		viewDirty = true
 	}
 
 	const sort = (compareFn?: (a: number, b: number) => number) => {
 		// Create temporary array for sorting
 		const temp = Array.from(dense.subarray(0, length))
 		temp.sort(compareFn)
-		
+
 		// Copy back to dense array
 		for (let i = 0; i < temp.length; i++) {
 			dense[i] = temp[i]
 		}
-		
+
 		// rebuild sparse mapping
 		for (let i = 0; i < length; i++) {
 			sparse[dense[i]] = i
 		}
+		viewDirty = true
 	}
 
 	return {
@@ -109,7 +115,11 @@ export const createUint32SparseSet = (initialCapacity: number = 1000): SparseSet
 		has,
 		sparse,
 		get dense() {
-			return new Uint32Array(dense.buffer, 0, length)
+			if (viewDirty) {
+				cachedView = new Uint32Array(dense.buffer, 0, length)
+				viewDirty = false
+			}
+			return cachedView
 		},
 		reset,
 		sort,

@@ -1,7 +1,7 @@
 import { World, InternalWorld, $internal } from './World'
 import { EntityId } from './Entity'
 import { ComponentRef } from './Component'
-import { getRelationTargets, Wildcard, Pair } from './Relation'
+import { getRelationTargets, Wildcard } from './Relation'
 import { query, queryHash, queryInternal, type QueryResult } from './Query'
 import { createSparseSet, createUint32SparseSet, type SparseSet } from './utils/SparseSet'
 
@@ -103,7 +103,7 @@ function getHierarchyData(world: World, relation: ComponentRef): HierarchyData {
  * Populates depth calculations for all existing entities with this relation
  */
 function populateExistingDepths(world: World, relation: ComponentRef): void {
-    const entitiesWithRelation = query(world, [Pair(relation, Wildcard)])
+    const entitiesWithRelation = query(world, [relation(Wildcard)])
     
     // Calculate depths for entities with this relation
     for (const entity of entitiesWithRelation) {
@@ -389,16 +389,16 @@ export function queryHierarchy(world: World, relation: ComponentRef, components:
     const hierarchyData = ctx.hierarchyData.get(relation)!
     const { depths } = hierarchyData
     
-    // Sort the query's sparse set in place - no allocation needed!
-    queryObj.sort((a, b) => {
+    // Create a sorted copy — do NOT sort the query's dense array in place,
+    // as that would permanently mutate iteration order for all non-hierarchy callers.
+    const sorted = Array.from(queryObj.dense).sort((a, b) => {
         const depthA = depths[a]
         const depthB = depths[b]
         return depthA !== depthB ? depthA - depthB : a - b
     })
-    
-    // Cache this result (dense is already the correct type)
-    const result = options.buffered ? queryObj.dense as Readonly<Uint32Array> : queryObj.dense as readonly EntityId[]
-    ctx.hierarchyQueryCache.set(relation, { hash: queryKey, result: result as QueryResult })
+
+    const result: QueryResult = options.buffered ? new Uint32Array(sorted) : sorted
+    ctx.hierarchyQueryCache.set(relation, { hash: queryKey, result })
     
     return result
 }
