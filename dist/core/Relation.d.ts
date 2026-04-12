@@ -21,11 +21,7 @@ export declare function createRelation<T>(options: {
     onTargetRemoved?: OnTargetRemovedCallback;
 }): Relation<T>;
 export declare const $wildcard: unique symbol;
-export declare function createWildcardRelation<T>(): Relation<T>;
-export declare function getWildcard(): Relation<any>;
 export declare const Wildcard: Relation<any>;
-export declare function createIsARelation<T>(): Relation<T>;
-export declare function getIsA(): Relation<any>;
 export declare const IsA: Relation<any>;
 export declare function isWildcard(relation: any): boolean;
 export declare function isRelation(component: any): boolean;

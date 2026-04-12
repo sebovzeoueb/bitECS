@@ -8,6 +8,14 @@ export interface QueryOptions {
     commit?: boolean;
     buffered?: boolean;
 }
+export type PairFilter = {
+    entity: EntityId;
+} | {
+    relation: ComponentRef;
+} | {
+    relation: ComponentRef;
+    target: any;
+};
 export type Query = SparseSet & {
     allComponents: ComponentRef[];
     orComponents: ComponentRef[];
@@ -16,11 +24,13 @@ export type Query = SparseSet & {
     orMasks: Record<number, number>;
     notMasks: Record<number, number>;
     hasMasks: Record<number, number>;
+    hasOrTerms: boolean;
     generations: number[];
     toRemove: SparseSet;
     addObservable: ReturnType<typeof createObservable>;
     removeObservable: ReturnType<typeof createObservable>;
     queues: Record<any, any>;
+    pairFilters: PairFilter[];
 };
 export type QueryOperatorType = 'Or' | 'And' | 'Not';
 export declare const $opType: unique symbol;
@@ -64,6 +74,10 @@ export declare const onRemove: ObservableHookDef;
 export declare const onSet: ObservableHookDef;
 export declare const onGet: ObservableHookDef;
 export declare function observe(world: World, hook: ObservableHook, callback: (eid: EntityId, ...args: any[]) => any): () => void;
+export declare const queueDrain: (world: World, hook: ObservableHook) => EntityId[];
+export declare const queuePeek: (world: World, hook: ObservableHook) => EntityId[];
+export declare const queue: (world: World, hook: ObservableHook) => EntityId[];
+export declare const peek: (world: World, hook: ObservableHook) => EntityId[];
 export declare const queryHash: (world: World, terms: QueryTerm[]) => string;
 export declare const registerQuery: (world: World, terms: QueryTerm[], options?: {
     buffered?: boolean;

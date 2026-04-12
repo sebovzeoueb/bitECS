@@ -4,10 +4,22 @@ import { Query, QueryResult } from './Query';
 import { EntityId } from './Entity';
 import { type SparseSet } from './utils/SparseSet';
 export declare const $internal: unique symbol;
+export type ArchetypeNode = {
+    edges: (ArchetypeEdge | undefined)[];
+};
+export type ArchetypeEdge = {
+    target: ArchetypeNode;
+    addTo: Query[];
+    removeFrom: Query[];
+};
+export type RelationEntry = {
+    subject: EntityId;
+    relation: ComponentRef;
+};
 export type WorldContext = {
     entityIndex: EntityIndex;
     entityMasks: number[][];
-    entityComponents: Map<EntityId, Set<ComponentRef>>;
+    entityComponents: ComponentRef[][];
     bitflag: number;
     componentMap: Map<ComponentRef, ComponentData>;
     componentCount: number;
@@ -15,7 +27,13 @@ export type WorldContext = {
     queriesHashMap: Map<string, Query>;
     notQueries: Set<any>;
     dirtyQueries: Set<any>;
-    entitiesWithRelations: Set<EntityId>;
+    entityArchetypes: ArchetypeNode[];
+    rootArchetype: ArchetypeNode;
+    prefabData: ComponentData | null;
+    relationTargets: (Map<ComponentRef, Set<any>> | null)[];
+    reverseIndex: (RelationEntry[] | null)[];
+    targetsByRelation: Map<ComponentRef, Set<EntityId>>;
+    observerQueues: Map<string, EntityId[]>;
     hierarchyData: Map<ComponentRef, {
         depths: Uint32Array;
         dirty: SparseSet;

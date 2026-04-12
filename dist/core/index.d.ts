@@ -5,7 +5,7 @@ export type { EntityId, } from './Entity';
 export { createEntityIndex, getId, getVersion, withVersioning, } from './EntityIndex';
 export { registerComponent, registerComponents, hasComponent, addComponent, addComponents, setComponent, removeComponent, removeComponents, getComponent, set } from './Component';
 export type { ComponentRef, ComponentData } from './Component';
-export { commitRemovals, removeQuery, registerQuery, query, observe, onAdd, onRemove, Or, And, Not, Any, All, None, onGet, onSet, Hierarchy, Cascade, asBuffer, isNested, noCommit, } from './Query';
+export { commitRemovals, removeQuery, registerQuery, query, queue, queueDrain, peek, queuePeek, observe, onAdd, onRemove, Or, And, Not, Any, All, None, onGet, onSet, Hierarchy, Cascade, asBuffer, isNested, noCommit, } from './Query';
 export type { ObservableHookDef, ObservableHook, QueryResult, Query, QueryOperatorType, OpReturnType, QueryOperator, QueryTerm, QueryOptions, HierarchyTerm, QueryModifier, } from './Query';
 export { pipe } from './utils/pipe';
 export { soa, aos } from './utils/soa';
