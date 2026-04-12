@@ -15,6 +15,7 @@ import {
 	Hierarchy,
 	withAutoRemoveSubject,
 	commitRemovals,
+	getHierarchyDepth,
 } from '../../src/core'
 
 describe('Archetype Graph', () => {
@@ -301,6 +302,52 @@ describe('Archetype Graph', () => {
 		// Normal query should still return ORIGINAL order, not depth-sorted
 		const normalAfter = Array.from(query(world, [Position]))
 		expect(normalAfter).toEqual(normalBefore)
+	})
+
+	test('flushDirtyDepths recalculates children when non-exclusive second parent changes depth', () => {
+		const world = createWorld()
+		// Non-exclusive: adding a second parent does NOT remove the first
+		// So invalidateSubtree is never called — children keep stale depths
+		const ChildOf = createRelation()
+		const Position = {}
+
+		// Build: deepRoot(0) -> mid(1) -> A(2) -> B(3)
+		const deepRoot = addEntity(world)
+		addComponent(world, deepRoot, Position)
+
+		const mid = addEntity(world)
+		addComponent(world, mid, Position)
+		addComponent(world, mid, ChildOf(deepRoot))
+
+		const a = addEntity(world)
+		addComponent(world, a, Position)
+		addComponent(world, a, ChildOf(mid))
+
+		const b = addEntity(world)
+		addComponent(world, b, Position)
+		addComponent(world, b, ChildOf(a))
+
+		// Verify initial depths
+		expect(getHierarchyDepth(world, deepRoot, ChildOf)).toBe(0)
+		expect(getHierarchyDepth(world, mid, ChildOf)).toBe(1)
+		expect(getHierarchyDepth(world, a, ChildOf)).toBe(2)
+		expect(getHierarchyDepth(world, b, ChildOf)).toBe(3)
+
+		// Add a SECOND, shallower parent to A (non-exclusive, no remove)
+		const shallowRoot = addEntity(world)
+		addComponent(world, shallowRoot, Position)
+		// shallowRoot has depth 0
+
+		addComponent(world, a, ChildOf(shallowRoot))
+		// A's depth should now be min(mid.depth+1, shallowRoot.depth+1) = min(2, 1) = 1
+		// B's depth should now be A.depth+1 = 2
+
+		// queryHierarchy triggers flushDirtyDepths
+		query(world, [Position, Hierarchy(ChildOf)])
+
+		expect(getHierarchyDepth(world, a, ChildOf)).toBe(1)
+		// B must be recalculated — should be 2, not stale 3
+		expect(getHierarchyDepth(world, b, ChildOf)).toBe(2)
 	})
 
 })

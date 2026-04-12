@@ -174,6 +174,39 @@ describe('Queue Tests', () => {
 		expect(queue(world, onAdd(Position))).toEqual([a])
 	})
 
+	test('onAdd queue should seed with existing matches on first call', () => {
+		const world = createWorld()
+		const Position = {}
+
+		// Add entities BEFORE registering the queue
+		const a = addEntity(world)
+		const b = addEntity(world)
+		addComponent(world, a, Position)
+		addComponent(world, b, Position)
+
+		// First queue call should return existing entities (not miss them)
+		expect(queue(world, onAdd(Position))).toEqual([a, b])
+
+		// Second call should be empty (drained)
+		expect(queue(world, onAdd(Position))).toEqual([])
+
+		// New adds still work
+		const c = addEntity(world)
+		addComponent(world, c, Position)
+		expect(queue(world, onAdd(Position))).toEqual([c])
+	})
+
+	test('onRemove queue should NOT seed with existing matches', () => {
+		const world = createWorld()
+		const Position = {}
+
+		const a = addEntity(world)
+		addComponent(world, a, Position)
+
+		// onRemove should not seed — nothing has been removed yet
+		expect(queue(world, onRemove(Position))).toEqual([])
+	})
+
 	test('should work in a system loop pattern', () => {
 		const world = createWorld()
 		const Health = {}

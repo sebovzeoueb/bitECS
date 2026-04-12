@@ -232,6 +232,12 @@ const getObserverQueue = (world: World, hook: ObservableHook): EntityId[] => {
 		buf = []
 		ctx.observerQueues.set(hash, buf)
 		observe(world, hook, (eid: EntityId) => buf!.push(eid))
+
+		// Seed onAdd queues with existing matches so first-frame adds aren't missed
+		if (hook[$opType] === 'add') {
+			const existing = queryInternal(world, hook[$opTerms])
+			for (let i = 0; i < existing.length; i++) buf.push(existing[i] as EntityId)
+		}
 	}
 
 	return buf

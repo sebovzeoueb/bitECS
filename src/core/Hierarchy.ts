@@ -344,12 +344,12 @@ export function flushDirtyDepths(world: World, relation: ComponentRef): void {
     
     if (dirty.dense.length === 0) return
     
-    // Simple approach: just calculate all dirty depths
+    // Recalculate all dirty depths unconditionally — entities may have stale
+    // non-INVALID_DEPTH values when marked dirty via markChildrenDirty
     for (const entity of dirty.dense) {
-        if (depths[entity] === INVALID_DEPTH) {
-            const newDepth = calculateEntityDepth(world, relation, entity)
-            setEntityDepth(hierarchyData, entity, newDepth)
-        }
+        const oldDepth = depths[entity]
+        const newDepth = calculateEntityDepth(world, relation, entity)
+        setEntityDepth(hierarchyData, entity, newDepth, oldDepth === INVALID_DEPTH ? undefined : oldDepth)
     }
     
     dirty.reset()
