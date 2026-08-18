@@ -4,3 +4,6 @@ sandbox
 coverage
 docs/CHANGELOG-next.md
 .cursorrules
+bench/
+dist/react/
+.pi/
