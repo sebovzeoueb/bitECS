@@ -21,7 +21,7 @@
       "bitecs/*": ["src/*/index.ts"]
     }
   },
-  "include": [ "./src/core", "./src/serialization" ],
+  "include": [ "./src/core", "./src/serialization", "./src/react" ],
   "exclude": [
     "node_modules",
     "test/*"

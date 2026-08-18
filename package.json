@@ -25,12 +25,18 @@
       "types": "./dist/legacy/index.d.ts",
       "import": "./dist/legacy/index.min.mjs",
       "require": "./dist/legacy/index.min.cjs"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.min.mjs",
+      "require": "./dist/react/index.min.cjs"
     }
   },
   "typesVersions": {
     "*": {
       "serialization": ["./dist/serialization/index.d.ts"],
-      "legacy": ["./dist/legacy/index.d.ts"]
+      "legacy": ["./dist/legacy/index.d.ts"],
+      "react": ["./dist/react/index.d.ts"]
     }
   },
   "author": {
@@ -48,7 +54,7 @@
   "scripts": {
     "test": "bun test",
     "docs": "bunx documentation build \"src/core/**/*.ts\" -f md -o docs/API.md",
-    "build": "bun build:core && bun build:serialization && bun build:legacy && bun build:types",
+    "build": "bun build:core && bun build:serialization && bun build:legacy && bun build:react && bun build:types",
     "build:types": "tsc",
     "build:core": "bun build:core:mjs && bun build:core:cjs && bun build:core:mjs:nonmin && bun build:core:cjs:nonmin",
     "build:core:mjs": "esbuild src/core/index.ts --bundle --minify --sourcemap --format=esm --outfile=dist/core/index.min.mjs",
@@ -69,10 +75,25 @@
     "build:next:mjs": "esbuild src/next/index.ts --bundle --minify --sourcemap --format=esm --outfile=dist/next/index.min.mjs --external:bitecs",
     "build:next:cjs": "esbuild src/next/index.ts --bundle --minify --sourcemap --format=cjs --outfile=dist/next/index.min.cjs --external:bitecs",
     "build:next:mjs:nonmin": "esbuild src/next/index.ts --bundle --sourcemap --format=esm --outfile=dist/next/index.mjs --external:bitecs",
-    "build:next:cjs:nonmin": "esbuild src/next/index.ts --bundle --sourcemap --format=cjs --outfile=dist/next/index.cjs --external:bitecs"
+    "build:next:cjs:nonmin": "esbuild src/next/index.ts --bundle --sourcemap --format=cjs --outfile=dist/next/index.cjs --external:bitecs",
+    "build:react": "bun build:react:mjs && bun build:react:cjs && bun build:react:mjs:nonmin && bun build:react:cjs:nonmin",
+    "build:react:mjs": "esbuild src/react/index.ts --bundle --minify --sourcemap --format=esm --outfile=dist/react/index.min.mjs --external:bitecs --external:react",
+    "build:react:cjs": "esbuild src/react/index.ts --bundle --minify --sourcemap --format=cjs --outfile=dist/react/index.min.cjs --external:bitecs --external:react",
+    "build:react:mjs:nonmin": "esbuild src/react/index.ts --bundle --sourcemap --format=esm --outfile=dist/react/index.mjs --external:bitecs --external:react",
+    "build:react:cjs:nonmin": "esbuild src/react/index.ts --bundle --sourcemap --format=cjs --outfile=dist/react/index.cjs --external:bitecs --external:react"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@types/react": "^19.0.0",
     "bun-types": "^1.2.21",
-    "esbuild": "^0.23.1"
+    "esbuild": "^0.23.1",
+    "react": "^19.0.0"
   }
 }
