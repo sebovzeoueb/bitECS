@@ -148,6 +148,21 @@ export const removeEntity = (world: World, eid: EntityId) => {
 		for (let i = 0; i < ctx.entityMasks.length; i++) {
 			ctx.entityMasks[i][currentEid] = 0
 		}
+
+		// Release this world's registrations of pairs targeting the removed entity,
+		// unless a query or set/get subscriber still needs the pair's identity.
+		// Once every world releases a pair, GC reclaims it and its global cache entry.
+		const deadPairs = ctx.pairsByTarget.get(currentEid)
+		if (deadPairs) {
+			ctx.pairsByTarget.delete(currentEid)
+			for (let i = 0; i < deadPairs.length; i++) {
+				const pairData = ctx.componentMap.get(deadPairs[i])
+				if (pairData && pairData.queries.size === 0 &&
+					pairData.setObservable.count() === 0 && pairData.getObservable.count() === 0) {
+					ctx.componentMap.delete(deadPairs[i])
+				}
+			}
+		}
 	}
 }
 

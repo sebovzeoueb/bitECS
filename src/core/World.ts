@@ -46,6 +46,7 @@ export type WorldContext = {
     relationTargets: (Map<ComponentRef, Set<any>> | null)[]
     reverseIndex: (RelationEntry[] | null)[]
     targetsByRelation: Map<ComponentRef, Set<EntityId>>
+    pairsByTarget: Map<EntityId, ComponentRef[]>
     // Observer queues (for queue/queuePeek)
     observerQueues: Map<string, EntityId[]>
     // Hierarchy tracking
@@ -84,6 +85,7 @@ const createWorldContext = (entityIndex?: EntityIndex): WorldContext => ({
     relationTargets: [],
     reverseIndex: [],
     targetsByRelation: new Map(),
+    pairsByTarget: new Map(),
     observerQueues: new Map(),
     hierarchyData: new Map(),
     hierarchyActiveRelations: new Set(),

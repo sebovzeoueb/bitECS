@@ -220,6 +220,17 @@ export const registerComponent = (world: World, component: ComponentRef) => {
 
 	ctx.componentMap.set(component, data)
 
+	// Index pairs by numeric target so removeEntity can release their registrations
+	if (component[$isPairComponent] && typeof component[$pairTarget] === 'number') {
+		const target = component[$pairTarget]
+		let list = ctx.pairsByTarget.get(target)
+		if (!list) {
+			list = []
+			ctx.pairsByTarget.set(target, list)
+		}
+		list.push(component)
+	}
+
 	if (component === Prefab) ctx.prefabData = data
 
 	if (!isSpecificPair) {
@@ -329,9 +340,18 @@ export const setComponent = (
 	world: World,
 	eid: EntityId,
 	component: ComponentRef,
-	data: any
+	data?: any
 ): void => {
-	addComponent(world, eid, set(component, data))
+	const ctx = (world as InternalWorld)[$internal]
+	const componentData = ctx.componentMap.get(component)
+	if (componentData) {
+		const { generationId, bitflag } = componentData
+		if ((ctx.entityMasks[generationId][eid] & bitflag) === bitflag) {
+			componentData.setObservable.notify(eid, data)
+			return
+		}
+	}
+	addComponent(world, eid, data !== undefined ? set(component, data) : component)
 }
 
 // ── Inheritance ──────────────────────────────────────────────────────
@@ -355,9 +375,23 @@ const recursivelyInherit = (ctx: WorldContext, world: World, baseEid: EntityId, 
 		if (!hasComponent(world, baseEid, component)) {
 			addComponent(world, baseEid, component)
 			const componentData = ctx.componentMap.get(component)
-			if (componentData?.setObservable) {
+			if (componentData) {
+				// Try observable-based get/set first
 				const data = getComponent(world, inheritedEid, component)
-				componentData.setObservable.notify(baseEid, data)
+				if (data !== undefined) {
+					componentData.setObservable.notify(baseEid, data)
+				} else {
+					// Fall back to copying SoA array values directly
+					const ref = componentData.ref
+					if (ref && typeof ref === 'object') {
+						for (const key in ref) {
+							const store = ref[key]
+							if (ArrayBuffer.isView(store) || Array.isArray(store)) {
+								store[baseEid] = store[inheritedEid]
+							}
+						}
+					}
+				}
 			}
 		}
 	}
@@ -507,7 +541,7 @@ export const addComponent = (world: World, eid: EntityId, componentOrSet: Compon
 	const componentData = ensureComponentData(world, ctx, component)
 	const { generationId, bitflag } = componentData
 	if ((ctx.entityMasks[generationId][eid] & bitflag) === bitflag) {
-		if (data !== undefined) componentData.setObservable.notify(eid, data)
+		componentData.setObservable.notify(eid, data)
 		return false
 	}
 	ctx.entityMasks[generationId][eid] |= bitflag

@@ -5,6 +5,7 @@ export type Observer = (entity: EntityId, ...args: any[]) => void | object
 export interface Observable {
   subscribe: (observer: Observer) => () => void
   notify: (entity: EntityId, ...args: any[]) => void | object
+  count: () => number
 }
 
 export const createObservable = (): Observable => {
@@ -30,5 +31,5 @@ export const createObservable = (): Observable => {
     return result
   }
 
-  return { subscribe, notify }
+  return { subscribe, notify, count: () => observers.length }
 }

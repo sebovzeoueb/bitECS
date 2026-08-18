@@ -188,6 +188,27 @@ describe('Component Tests', () => {
 		unsubscribe()
 	})
 
+	it('should notify onSet with undefined data when setComponent is called without data', () => {
+		const world = createWorld()
+		const eid = addEntity(world)
+		const Position = { x: [] as number[], y: [] as number[] }
+
+		const mockObserver = mock(() => {})
+		const unsubscribe = observe(world, onSet(Position), mockObserver)
+
+		// no data, entity lacks component: adds it, no set notification
+		setComponent(world, eid, Position)
+		expect(hasComponent(world, eid, Position)).toBe(true)
+		expect(mockObserver).toHaveBeenCalledTimes(0)
+
+		// no data, entity has component: notifies observers with undefined
+		setComponent(world, eid, Position)
+		expect(mockObserver).toHaveBeenCalledTimes(1)
+		expect(mockObserver).toHaveBeenCalledWith(eid, undefined)
+
+		unsubscribe()
+	})
+
 	it('should properly clean up relation components when removing relations', () => {
 		const world = createWorld()
 		

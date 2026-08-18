@@ -46,12 +46,21 @@ export const $relationData = Symbol.for('bitecs-relationData')
  * @template T
  */
 type RelationData<T> = {
-    pairsMap: Map<number | string | Relation<any>, T>
+    pairsMap: Map<number | string | Relation<any>, WeakRef<T & object>>
     initStore: (eid: EntityId) => T
     exclusiveRelation: boolean
     autoRemoveSubject: boolean
     onTargetRemoved: OnTargetRemovedCallback
 }
+
+// Sweeps dead cache entries after a pair component is garbage collected.
+// A pair stays alive while any world's componentMap, query, or user code
+// references it; once all references drop, its cache entry is removed.
+const pairFinalizer = new FinalizationRegistry<{ pairsMap: Map<any, WeakRef<any>>, key: any, ref: WeakRef<any> }>(
+    ({ pairsMap, key, ref }) => {
+        if (pairsMap.get(key) === ref) pairsMap.delete(key)
+    }
+)
 
 /**
  * Type definition for a Relation function.
@@ -78,15 +87,17 @@ const createBaseRelation = <T>(): Relation<T> => {
     const relation = (target: RelationTarget): T => {
         if (target === undefined) throw Error('Relation target is undefined')
         const normalizedTarget = target === '*' ? Wildcard : target
-        if (!data.pairsMap.has(normalizedTarget)) {
-            const component = data.initStore ? data.initStore(target) : {} as T
-            defineHiddenProperty(component, $relation, relation)
-            defineHiddenProperty(component, $pairTarget, normalizedTarget)
-            defineHiddenProperty(component, $isPairComponent, true)
-            data.pairsMap.set(normalizedTarget, component)
-        }
+        const existing = data.pairsMap.get(normalizedTarget)?.deref()
+        if (existing !== undefined) return existing
 
-        return data.pairsMap.get(normalizedTarget)!
+        const component = data.initStore ? data.initStore(target) : {} as T
+        defineHiddenProperty(component, $relation, relation)
+        defineHiddenProperty(component, $pairTarget, normalizedTarget)
+        defineHiddenProperty(component, $isPairComponent, true)
+        const ref = new WeakRef(component as T & object)
+        data.pairsMap.set(normalizedTarget, ref)
+        pairFinalizer.register(component as T & object, { pairsMap: data.pairsMap, key: normalizedTarget, ref })
+        return component
     }
 
     defineHiddenProperty(relation, $relationData, data)
