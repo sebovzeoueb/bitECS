@@ -225,6 +225,27 @@ describe('Archetype Graph', () => {
 		expect(result).not.toContain(e2)
 	})
 
+	test('registering a query preserves existing entity archetypes', () => {
+		const world = createWorld()
+		const AnchoredPosition = [] as number[][]
+		const Mesh = [] as string[]
+
+		const anchored = addEntity(world)
+		const unanchored = addEntity(world)
+		addComponent(world, anchored, AnchoredPosition)
+
+		// Registering a query after entities have different masks must not make
+		// their next identical transition share a cached result.
+		query(world, [AnchoredPosition, Mesh])
+
+		addComponent(world, anchored, Mesh)
+		addComponent(world, unanchored, Mesh)
+
+		const result = Array.from(query(world, [AnchoredPosition, Mesh]))
+		expect(result).toEqual([anchored])
+		expect(hasComponent(world, unanchored, AnchoredPosition)).toBe(false)
+	})
+
 	test('bulk removeComponent then single addComponent does not poison rootArchetype cache', () => {
 		const world = createWorld()
 		const A = {}

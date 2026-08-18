@@ -313,6 +313,20 @@ export const queryHash = (world: World, terms: QueryTerm[]): string => {
 }
 
 /**
+ * Invalidates cached archetype transitions while preserving each entity's
+ * current archetype node. Replacing the root node and clearing
+ * entityArchetypes would make entities with different component masks appear
+ * to share the same archetype until their next transition.
+ */
+const invalidateArchetypeTransitions = (ctx: InternalWorld[typeof $internal]) => {
+	ctx.rootArchetype.edges = []
+	for (let i = 0; i < ctx.entityArchetypes.length; i++) {
+		const node = ctx.entityArchetypes[i]
+		if (node) node.edges = []
+	}
+}
+
+/**
  * @function registerQuery  
  * @description Registers a new query in the world using unified clause-mask compilation.
  * @param {World} world - The world object.
@@ -425,9 +439,9 @@ export const registerQuery = (world: World, terms: QueryTerm[], options: { buffe
 
 	if (notComponents.length) ctx.notQueries.add(query)
 
-	// Invalidate archetype graph — new query changes transition results
-	ctx.rootArchetype = { edges: [] }
-	ctx.entityArchetypes = []
+	// New queries change the cached transition results, but existing entities
+	// must retain the nodes that identify their current archetypes.
+	invalidateArchetypeTransitions(ctx)
 
 	// Populate initial query membership
 	if (pairFilters.length > 0 && queryComponents.length === 0) {
@@ -686,7 +700,6 @@ export const removeQuery = (world: World, terms: QueryTerm[]) => {
 	if (query) {
 		ctx.queries.delete(query)
 		ctx.queriesHashMap.delete(hash)
-		ctx.rootArchetype = { edges: [] }
-		ctx.entityArchetypes = []
+		invalidateArchetypeTransitions(ctx)
 	}
 }
