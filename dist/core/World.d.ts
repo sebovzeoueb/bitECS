@@ -33,6 +33,7 @@ export type WorldContext = {
     relationTargets: (Map<ComponentRef, Set<any>> | null)[];
     reverseIndex: (RelationEntry[] | null)[];
     targetsByRelation: Map<ComponentRef, Set<EntityId>>;
+    pairsByTarget: Map<EntityId, ComponentRef[]>;
     observerQueues: Map<string, EntityId[]>;
     hierarchyData: Map<ComponentRef, {
         depths: Uint32Array;

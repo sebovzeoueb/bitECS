@@ -24,7 +24,7 @@ export declare const set: <T extends ComponentRef>(component: T, data: any) => {
     component: T;
     data: any;
 };
-export declare const setComponent: (world: World, eid: EntityId, component: ComponentRef, data: any) => void;
+export declare const setComponent: (world: World, eid: EntityId, component: ComponentRef, data?: any) => void;
 export declare const addComponent: (world: World, eid: EntityId, componentOrSet: ComponentRef | ComponentSetter) => boolean;
 export declare function addComponents(world: World, eid: EntityId, components: (ComponentRef | ComponentSetter)[]): void;
 export declare function addComponents(world: World, eid: EntityId, ...components: (ComponentRef | ComponentSetter)[]): void;

@@ -185,6 +185,7 @@ var createWorldContext = (entityIndex) => ({
   relationTargets: [],
   reverseIndex: [],
   targetsByRelation: /* @__PURE__ */ new Map(),
+  pairsByTarget: /* @__PURE__ */ new Map(),
   observerQueues: /* @__PURE__ */ new Map(),
   hierarchyData: /* @__PURE__ */ new Map(),
   hierarchyActiveRelations: /* @__PURE__ */ new Set(),
@@ -342,7 +343,7 @@ var createObservable = () => {
     }
     return result;
   };
-  return { subscribe, notify };
+  return { subscribe, notify, count: () => observers.length };
 };
 
 // src/core/Relation.ts
@@ -350,6 +351,11 @@ var $relation = Symbol.for("bitecs-relation");
 var $pairTarget = Symbol.for("bitecs-pairTarget");
 var $isPairComponent = Symbol.for("bitecs-isPairComponent");
 var $relationData = Symbol.for("bitecs-relationData");
+var pairFinalizer = new FinalizationRegistry(
+  ({ pairsMap, key, ref }) => {
+    if (pairsMap.get(key) === ref) pairsMap.delete(key);
+  }
+);
 var createBaseRelation = () => {
   const data = {
     pairsMap: /* @__PURE__ */ new Map(),
@@ -361,14 +367,16 @@ var createBaseRelation = () => {
   const relation = (target) => {
     if (target === void 0) throw Error("Relation target is undefined");
     const normalizedTarget = target === "*" ? Wildcard : target;
-    if (!data.pairsMap.has(normalizedTarget)) {
-      const component = data.initStore ? data.initStore(target) : {};
-      defineHiddenProperty(component, $relation, relation);
-      defineHiddenProperty(component, $pairTarget, normalizedTarget);
-      defineHiddenProperty(component, $isPairComponent, true);
-      data.pairsMap.set(normalizedTarget, component);
-    }
-    return data.pairsMap.get(normalizedTarget);
+    const existing = data.pairsMap.get(normalizedTarget)?.deref();
+    if (existing !== void 0) return existing;
+    const component = data.initStore ? data.initStore(target) : {};
+    defineHiddenProperty(component, $relation, relation);
+    defineHiddenProperty(component, $pairTarget, normalizedTarget);
+    defineHiddenProperty(component, $isPairComponent, true);
+    const ref = new WeakRef(component);
+    data.pairsMap.set(normalizedTarget, ref);
+    pairFinalizer.register(component, { pairsMap: data.pairsMap, key: normalizedTarget, ref });
+    return component;
   };
   defineHiddenProperty(relation, $relationData, data);
   return relation;
@@ -616,10 +624,9 @@ function flushDirtyDepths(world, relation) {
   const { dirty, depths } = hierarchyData;
   if (dirty.dense.length === 0) return;
   for (const entity of dirty.dense) {
-    if (depths[entity] === INVALID_DEPTH) {
-      const newDepth = calculateEntityDepth(world, relation, entity);
-      setEntityDepth(hierarchyData, entity, newDepth);
-    }
+    const oldDepth = depths[entity];
+    const newDepth = calculateEntityDepth(world, relation, entity);
+    setEntityDepth(hierarchyData, entity, newDepth, oldDepth === INVALID_DEPTH ? void 0 : oldDepth);
   }
   dirty.reset();
 }
@@ -717,6 +724,10 @@ var getObserverQueue = (world, hook) => {
     buf = [];
     ctx.observerQueues.set(hash, buf);
     observe(world, hook, (eid) => buf.push(eid));
+    if (hook[$opType] === "add") {
+      const existing = queryInternal(world, hook[$opTerms]);
+      for (let i = 0; i < existing.length; i++) buf.push(existing[i]);
+    }
   }
   return buf;
 };
@@ -760,6 +771,13 @@ var queryHash = (world, terms) => {
     return getComponentId(term).toString();
   };
   return terms.map(termToString).sort().join("-");
+};
+var invalidateArchetypeTransitions = (ctx) => {
+  ctx.rootArchetype.edges = [];
+  for (let i = 0; i < ctx.entityArchetypes.length; i++) {
+    const node = ctx.entityArchetypes[i];
+    if (node) node.edges = [];
+  }
 };
 var registerQuery = (world, terms, options = {}) => {
   const ctx = world[$internal];
@@ -854,8 +872,7 @@ var registerQuery = (world, terms, options = {}) => {
     allComponentsData[i].queries.add(query2);
   }
   if (notComponents.length) ctx.notQueries.add(query2);
-  ctx.rootArchetype = { edges: [] };
-  ctx.entityArchetypes = [];
+  invalidateArchetypeTransitions(ctx);
   if (pairFilters.length > 0 && queryComponents.length === 0) {
     for (const filter of pairFilters) {
       if ("entity" in filter) {
@@ -1005,8 +1022,7 @@ var removeQuery = (world, terms) => {
   if (query2) {
     ctx.queries.delete(query2);
     ctx.queriesHashMap.delete(hash);
-    ctx.rootArchetype = { edges: [] };
-    ctx.entityArchetypes = [];
+    invalidateArchetypeTransitions(ctx);
   }
 };
 
@@ -1114,6 +1130,15 @@ var registerComponent = (world, component) => {
     getObservable: createObservable()
   };
   ctx.componentMap.set(component, data);
+  if (component[$isPairComponent] && typeof component[$pairTarget] === "number") {
+    const target = component[$pairTarget];
+    let list = ctx.pairsByTarget.get(target);
+    if (!list) {
+      list = [];
+      ctx.pairsByTarget.set(target, list);
+    }
+    list.push(component);
+  }
   if (component === Prefab) ctx.prefabData = data;
   if (!isSpecificPair) {
     ctx.bitflag *= 2;
@@ -1166,7 +1191,16 @@ var set = (component, data) => ({
   data
 });
 var setComponent = (world, eid, component, data) => {
-  addComponent(world, eid, set(component, data));
+  const ctx = world[$internal];
+  const componentData = ctx.componentMap.get(component);
+  if (componentData) {
+    const { generationId, bitflag } = componentData;
+    if ((ctx.entityMasks[generationId][eid] & bitflag) === bitflag) {
+      componentData.setObservable.notify(eid, data);
+      return;
+    }
+  }
+  addComponent(world, eid, data !== void 0 ? set(component, data) : component);
 };
 var recursivelyInherit = (ctx, world, baseEid, inheritedEid, visited = /* @__PURE__ */ new Set()) => {
   if (visited.has(inheritedEid)) return;
@@ -1177,9 +1211,21 @@ var recursivelyInherit = (ctx, world, baseEid, inheritedEid, visited = /* @__PUR
     if (!hasComponent(world, baseEid, component)) {
       addComponent(world, baseEid, component);
       const componentData = ctx.componentMap.get(component);
-      if (componentData?.setObservable) {
+      if (componentData) {
         const data = getComponent(world, inheritedEid, component);
-        componentData.setObservable.notify(baseEid, data);
+        if (data !== void 0) {
+          componentData.setObservable.notify(baseEid, data);
+        } else {
+          const ref = componentData.ref;
+          if (ref && typeof ref === "object") {
+            for (const key in ref) {
+              const store = ref[key];
+              if (ArrayBuffer.isView(store) || Array.isArray(store)) {
+                store[baseEid] = store[inheritedEid];
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -1284,7 +1330,7 @@ var addComponent = (world, eid, componentOrSet) => {
   const componentData = ensureComponentData(world, ctx, component);
   const { generationId, bitflag } = componentData;
   if ((ctx.entityMasks[generationId][eid] & bitflag) === bitflag) {
-    if (data !== void 0) componentData.setObservable.notify(eid, data);
+    componentData.setObservable.notify(eid, data);
     return false;
   }
   ctx.entityMasks[generationId][eid] |= bitflag;
@@ -1491,6 +1537,16 @@ var removeEntity = (world, eid) => {
     ctx.reverseIndex[currentEid] = null;
     for (let i = 0; i < ctx.entityMasks.length; i++) {
       ctx.entityMasks[i][currentEid] = 0;
+    }
+    const deadPairs = ctx.pairsByTarget.get(currentEid);
+    if (deadPairs) {
+      ctx.pairsByTarget.delete(currentEid);
+      for (let i = 0; i < deadPairs.length; i++) {
+        const pairData = ctx.componentMap.get(deadPairs[i]);
+        if (pairData && pairData.queries.size === 0 && pairData.setObservable.count() === 0 && pairData.getObservable.count() === 0) {
+          ctx.componentMap.delete(deadPairs[i]);
+        }
+      }
     }
   }
 };
