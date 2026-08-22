@@ -202,6 +202,20 @@ function getEntityDepth(world: World, relation: ComponentRef, entity: EntityId):
 }
 
 /**
+ * Iterates the children of a parent via the reverse relation index, without
+ * registering a query per parent. Includes prefab children (harmless for depth
+ * bookkeeping; hierarchy query results still come from prefab-excluding queries).
+ */
+function forEachChild(world: World, relation: ComponentRef, parent: EntityId, fn: (child: EntityId) => void): void {
+    const ctx = (world as InternalWorld)[$internal]
+    const entries = ctx.reverseIndex[parent]
+    if (!entries) return
+    for (let i = 0; i < entries.length; i++) {
+        if (entries[i].relation === relation) fn(entries[i].subject)
+    }
+}
+
+/**
  * Marks an entity and its children as needing depth recalculation. This is used
  * internally when hierarchy changes occur.
  * @param {World} world - The world object.
@@ -214,11 +228,10 @@ export function markChildrenDirty(world: World, relation: ComponentRef, parent: 
     if (visited.has(parent)) return
     visited.add(parent)
     
-    const children = query(world, [relation(parent)])
-    for (const child of children) {
+    forEachChild(world, relation, parent, (child) => {
         dirty.add(child)
         markChildrenDirty(world, relation, child, dirty, visited)
-    }
+    })
 }
 
 /**
@@ -322,10 +335,9 @@ function invalidateSubtree(world: World, relation: ComponentRef, entity: EntityI
     }
     
     // Find and invalidate all children
-    const children = query(world, [relation(entity)])
-    for (const child of children) {
+    forEachChild(world, relation, entity, (child) => {
         invalidateSubtree(world, relation, child, depths, visited)
-    }
+    })
 }
 
 /**

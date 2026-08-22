@@ -372,3 +372,41 @@ describe('Archetype Graph', () => {
 	})
 
 })
+
+describe('Archetype node interning', () => {
+	const getNode = (world: any, eid: number) =>
+		world[Symbol.for('bitecs_internal')].entityArchetypes[eid]
+
+	test('identical bulk spawns share one archetype node', () => {
+		const world = createWorld()
+		const A = { v: [] as number[] }
+		const B = { v: [] as number[] }
+		const e1 = addEntity(world, A, B)
+		const e2 = addEntity(world, A, B)
+		expect(getNode(world, e1)).toBe(getNode(world, e2))
+	})
+
+	test('different add order converges on the same node', () => {
+		const world = createWorld()
+		const A = { v: [] as number[] }
+		const B = { v: [] as number[] }
+		const e1 = addEntity(world)
+		addComponent(world, e1, A)
+		addComponent(world, e1, B)
+		const e2 = addEntity(world)
+		addComponent(world, e2, B)
+		addComponent(world, e2, A)
+		expect(getNode(world, e1)).toBe(getNode(world, e2))
+	})
+
+	test('single adds and bulk adds land on the same node', () => {
+		const world = createWorld()
+		const A = { v: [] as number[] }
+		const B = { v: [] as number[] }
+		const e1 = addEntity(world, A, B)
+		const e2 = addEntity(world)
+		addComponent(world, e2, A)
+		addComponent(world, e2, B)
+		expect(getNode(world, e1)).toBe(getNode(world, e2))
+	})
+})

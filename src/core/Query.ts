@@ -1,9 +1,6 @@
 import { createSparseSet, createUint32SparseSet, type SparseSet } from './utils/SparseSet'
-import { hasComponent, registerComponent } from './Component'
-import { ComponentRef, ComponentData } from './Component'
-import { World } from "./World"
-import { InternalWorld } from './World'
-import { $internal } from './World'
+import { hasComponent, registerComponent, ComponentRef, ComponentData } from './Component'
+import { $internal, World, InternalWorld, RelationEntry } from './World'
 import { createObservable } from './utils/Observer'
 import { EntityId, Prefab } from './Entity'
 import { queryHierarchy, queryHierarchyDepth } from './Hierarchy'
@@ -41,7 +38,8 @@ export interface QueryOptions {
  * @property {ReturnType<typeof createObservable>} addObservable - Observable for entity additions.
  * @property {ReturnType<typeof createObservable>} removeObservable - Observable for entity removals.
  */
-export type PairFilter = { entity: EntityId } | { relation: ComponentRef } | { relation: ComponentRef, target: any }
+export type SpecificPairFilter = { relation: ComponentRef, target: any }
+export type PairFilter = { entity: EntityId } | { relation: ComponentRef } | SpecificPairFilter
 
 export type Query = SparseSet & {
 	allComponents: ComponentRef[]
@@ -58,6 +56,9 @@ export type Query = SparseSet & {
 	removeObservable: ReturnType<typeof createObservable>
 	queues: Record<any, any>
 	pairFilters: PairFilter[]
+	componentsData: ComponentData[]
+	hash: string
+	pairComponent?: ComponentRef
 }
 
 /**
@@ -222,25 +223,63 @@ const hookHash = (world: World, hook: ObservableHook): string => {
 
 /**
  * Returns the observer queue for a hook, creating and subscribing on first call.
+ * Queues are tracked by their numeric pair targets so entity removal can drop
+ * them once the target no longer exists.
  */
 const getObserverQueue = (world: World, hook: ObservableHook): EntityId[] => {
 	const ctx = (world as InternalWorld)[$internal]
 	const hash = hookHash(world, hook)
 
-	let buf = ctx.observerQueues.get(hash)
-	if (!buf) {
-		buf = []
-		ctx.observerQueues.set(hash, buf)
-		observe(world, hook, (eid: EntityId) => buf!.push(eid))
+	let entry = ctx.observerQueues.get(hash)
+	if (!entry) {
+		const buf: EntityId[] = []
+		const unsubscribe = observe(world, hook, (eid: EntityId) => buf.push(eid))
 
 		// Seed onAdd queues with existing matches so first-frame adds aren't missed
 		if (hook[$opType] === 'add') {
 			const existing = queryInternal(world, hook[$opTerms])
 			for (let i = 0; i < existing.length; i++) buf.push(existing[i] as EntityId)
 		}
+
+		entry = { buf, unsubscribe }
+		ctx.observerQueues.set(hash, entry)
+
+		// Track numeric pair targets so removeEntity can release the queue
+		const terms = hook[$opTerms]
+		for (let i = 0; i < terms.length; i++) {
+			const term = terms[i]
+			if (term && typeof term === 'object' && term[$isPairComponent] && typeof term[$pairTarget] === 'number') {
+				const target = term[$pairTarget]
+				let set = ctx.observerQueuesByTarget.get(target)
+				if (!set) {
+					set = new Set()
+					ctx.observerQueuesByTarget.set(target, set)
+				}
+				set.add(hash)
+			}
+		}
 	}
 
-	return buf
+	return entry.buf
+}
+
+/**
+ * Releases observer queues for hooks that reference the given pair target,
+ * which is being removed. Must run before pair queries are evicted so the
+ * internal subscriptions stop counting against them.
+ */
+export const dropObserverQueuesFor = (world: World, target: EntityId) => {
+	const ctx = (world as InternalWorld)[$internal]
+	const hashes = ctx.observerQueuesByTarget.get(target)
+	if (!hashes) return
+	for (const hash of hashes) {
+		const entry = ctx.observerQueues.get(hash)
+		if (entry) {
+			entry.unsubscribe()
+			ctx.observerQueues.delete(hash)
+		}
+	}
+	ctx.observerQueuesByTarget.delete(target)
 }
 
 /**
@@ -313,18 +352,63 @@ export const queryHash = (world: World, terms: QueryTerm[]): string => {
 }
 
 /**
- * Invalidates cached archetype transitions while preserving each entity's
- * current archetype node. Replacing the root node and clearing
- * entityArchetypes would make entities with different component masks appear
- * to share the same archetype until their next transition.
+ * Invalidates cached archetype transitions by bumping the query version.
+ * Cached edges are stamped with the version they were computed under and
+ * recomputed lazily when the stamp no longer matches.
  */
 const invalidateArchetypeTransitions = (ctx: InternalWorld[typeof $internal]) => {
-	ctx.rootArchetype.edges = []
-	for (let i = 0; i < ctx.entityArchetypes.length; i++) {
-		const node = ctx.entityArchetypes[i]
-		if (node) node.edges = []
-	}
+	ctx.queryVersion++
 }
+
+const indexQuery = <K>(index: Map<K, Set<Query>>, key: K, query: Query) => {
+	let set = index.get(key)
+	if (!set) {
+		set = new Set()
+		index.set(key, set)
+	}
+	set.add(query)
+}
+
+const unindexQuery = <K>(index: Map<K, Set<Query>>, key: K, query: Query) => {
+	const set = index.get(key)
+	if (!set) return
+	set.delete(query)
+	if (set.size === 0) index.delete(key)
+}
+
+/**
+ * Removes a query from every world registry: query set, hash map, component
+ * query sets, notQueries, dirtyQueries, and the pair filter indexes.
+ * Used by removeQuery and by entity removal to release queries whose pair
+ * target no longer exists.
+ */
+export const removeQueryFromWorld = (world: World, query: Query) => {
+	const ctx = (world as InternalWorld)[$internal]
+	if (!ctx.queries.delete(query)) return
+	if (query.pairComponent) ctx.pairQueryMap.delete(query.pairComponent)
+	if (ctx.queriesHashMap.get(query.hash) === query) ctx.queriesHashMap.delete(query.hash)
+	ctx.notQueries.delete(query)
+	ctx.dirtyQueries.delete(query)
+	for (let i = 0; i < query.componentsData.length; i++) {
+		query.componentsData[i].queries.delete(query)
+	}
+	for (let i = 0; i < query.pairFilters.length; i++) {
+		const filter = query.pairFilters[i]
+		if ('target' in filter) unindexQuery(ctx.queriesByTarget, filter.target, query)
+		else if ('entity' in filter) unindexQuery(ctx.queriesByEntity, filter.entity, query)
+		else unindexQuery(ctx.queriesByRelation, filter.relation, query)
+	}
+	invalidateArchetypeTransitions(ctx)
+}
+
+/**
+ * A single specific-pair term (e.g. ChildOf(eid)) resolves to the same
+ * component object every time, so its query can be cached by that object
+ * instead of by hash string. Wildcard pairs are excluded: they need filters.
+ */
+const isCacheablePairTerm = (term: QueryTerm): boolean =>
+	typeof term === 'object' && term !== null &&
+	term[$isPairComponent] && !isWildcard(term[$relation]) && term[$pairTarget] !== Wildcard
 
 /**
  * @function registerQuery  
@@ -346,13 +430,17 @@ export const registerQuery = (world: World, terms: QueryTerm[], options: { buffe
 
 	// Unwrap pair terms: Wildcard pairs use indexes, Relation(Wildcard) uses relation bitflag,
 	// specific pairs (Relation(target)) use their own bitflag — no unwrapping needed.
-	const unwrapTerm = (term: ComponentRef): ComponentRef => {
+	// Only the collect pass gathers pairFilters; later passes unwrap the same
+	// terms again and must not duplicate the filters.
+	const unwrapTerm = (term: ComponentRef, collectFilters = false): ComponentRef => {
 		if (term[$isPairComponent]) {
 			const relation = term[$relation]
 			const target = term[$pairTarget]
 			if (isWildcard(relation)) {
-				if (typeof target === 'number') pairFilters.push({ entity: target })
-				else if (isRelation(target)) pairFilters.push({ relation: target })
+				if (collectFilters) {
+					if (typeof target === 'number') pairFilters.push({ entity: target })
+					else if (isRelation(target)) pairFilters.push({ relation: target })
+				}
 				return null as any
 			}
 			if (target === Wildcard) {
@@ -361,7 +449,7 @@ export const registerQuery = (world: World, terms: QueryTerm[], options: { buffe
 			}
 			// Specific pair: use relation bitflag + pair filter
 			if (!ctx.componentMap.has(relation)) registerComponent(world, relation)
-			pairFilters.push({ relation, target })
+			if (collectFilters) pairFilters.push({ relation, target })
 			return relation
 		}
 		return term
@@ -373,7 +461,7 @@ export const registerQuery = (world: World, terms: QueryTerm[], options: { buffe
 			const opTerms = term[$opTerms]
 			for (let j = 0; j < opTerms.length; j++) collect(opTerms[j])
 		} else {
-			const unwrapped = unwrapTerm(term)
+			const unwrapped = unwrapTerm(term, true)
 			if (unwrapped === null) return // wildcard filter, no bitmask
 			if (!ctx.componentMap.has(unwrapped)) registerComponent(world, unwrapped)
 			queryComponents.push(unwrapped)
@@ -423,28 +511,43 @@ export const registerQuery = (world: World, terms: QueryTerm[], options: { buffe
 
 	const hasOrTerms = orComponents.length > 0
 
+	const isSingleSpecificPair = !options.buffered && terms.length === 1 && isCacheablePairTerm(terms[0])
+
 	const query = Object.assign(options.buffered ? createUint32SparseSet() : createSparseSet(), {
 		allComponents: queryComponents, orComponents, notComponents, masks, notMasks, orMasks, hasMasks, hasOrTerms, generations,
 		toRemove: createSparseSet(), addObservable: createObservable(), removeObservable: createObservable(), queues: {},
-		pairFilters
+		pairFilters, componentsData: allComponentsData, hash,
+		pairComponent: isSingleSpecificPair ? terms[0] : undefined
 	}) as Query
 
 	ctx.queries.add(query)
 
 	ctx.queriesHashMap.set(hash, query)
 
+	if (isSingleSpecificPair) ctx.pairQueryMap.set(terms[0], query)
 	for (let i = 0; i < allComponentsData.length; i++) {
 		allComponentsData[i].queries.add(query)
 	}
 
 	if (notComponents.length) ctx.notQueries.add(query)
 
+	// Index pair-filtered queries so pair operations and entity removal can
+	// find them without scanning every query in the world
+	for (let i = 0; i < pairFilters.length; i++) {
+		const filter = pairFilters[i]
+		if ('target' in filter) indexQuery(ctx.queriesByTarget, filter.target, query)
+		else if ('entity' in filter) indexQuery(ctx.queriesByEntity, filter.entity, query)
+		else indexQuery(ctx.queriesByRelation, filter.relation, query)
+	}
+
 	// New queries change the cached transition results, but existing entities
 	// must retain the nodes that identify their current archetypes.
 	invalidateArchetypeTransitions(ctx)
 
 	// Populate initial query membership
-	if (pairFilters.length > 0 && queryComponents.length === 0) {
+	const hasTargetFilters = pairFilters.some(f => 'target' in f)
+	const hasWildcardFilters = pairFilters.some(f => !('target' in f))
+	if (pairFilters.length > 0 && queryComponents.length === 0 && hasWildcardFilters) {
 		// Pure wildcard query — resolve from indexes
 		for (const filter of pairFilters) {
 			if ('entity' in filter) {
@@ -463,20 +566,48 @@ export const registerQuery = (world: World, terms: QueryTerm[], options: { buffe
 				}
 			}
 		}
-	} else {
-		// Standard bitmask-based initial population
-		const entityIndex = ctx.entityIndex
-		for (let i = 0; i < entityIndex.aliveCount; i++) {
-			const eid = entityIndex.dense[i]
-			if (hasComponent(world, eid, Prefab)) continue
-			const match = queryCheckEntity(world, query, eid)
-			if (match) {
-				queryAddEntity(query, eid)
+	} else if (hasTargetFilters && !hasWildcardFilters) {
+		// Specific-pair queries — populate from the reverse target index instead
+		// of scanning every alive entity
+		let bestFilter: SpecificPairFilter | null = null
+		let bestCandidates: RelationEntry[] | null = null
+		for (const filter of pairFilters) {
+			if ('target' in filter && typeof filter.target === 'number') {
+				const candidates = ctx.reverseIndex[filter.target]
+				if (candidates && (!bestCandidates || candidates.length < bestCandidates.length)) {
+					bestFilter = filter
+					bestCandidates = candidates
+				}
 			}
 		}
+		if (bestFilter && bestCandidates) {
+			for (let i = 0; i < bestCandidates.length; i++) {
+				const entry = bestCandidates[i]
+				if (entry.relation !== bestFilter.relation) continue
+				if (hasComponent(world, entry.subject, Prefab)) continue
+				if (queryCheckEntity(world, query, entry.subject)) queryAddEntity(query, entry.subject)
+			}
+		} else {
+			// No numeric targets to index — fall back to a full scan
+			populateByScan(world, ctx, query)
+		}
+	} else {
+		populateByScan(world, ctx, query)
 	}
 
 	return query
+}
+
+/**
+ * Populates initial query membership by scanning all alive entities.
+ */
+const populateByScan = (world: World, ctx: InternalWorld[typeof $internal], query: Query) => {
+	const entityIndex = ctx.entityIndex
+	for (let i = 0; i < entityIndex.aliveCount; i++) {
+		const eid = entityIndex.dense[i]
+		if (hasComponent(world, eid, Prefab)) continue
+		if (queryCheckEntity(world, query, eid)) queryAddEntity(query, eid)
+	}
 }
 
 
@@ -491,6 +622,14 @@ export const registerQuery = (world: World, terms: QueryTerm[], options: { buffe
  * @returns {QueryResult} The result of the query.
  */
 export function queryInternal(world: World, terms: QueryTerm[], options: { buffered?: boolean } = {}): QueryResult {
+	const queryData = resolveQuery(world, terms, options)
+	return options.buffered ? queryData.dense as Readonly<Uint32Array> : queryData.dense as readonly EntityId[]
+}
+
+/**
+ * Resolves the registered Query for a set of terms, registering it on first use.
+ */
+const resolveQuery = (world: World, terms: QueryTerm[], options: { buffered?: boolean } = {}): Query => {
 	const ctx = (world as InternalWorld)[$internal]
 	const hash = queryHash(world, terms)
 	let queryData = ctx.queriesHashMap.get(hash)
@@ -499,8 +638,7 @@ export function queryInternal(world: World, terms: QueryTerm[], options: { buffe
 	} else if (options.buffered && !('buffer' in queryData.dense)) {
 		queryData = registerQuery(world, terms, { buffered: true })
 	}
-
-	return options.buffered ? queryData.dense as Readonly<Uint32Array> : queryData.dense as readonly EntityId[]
+	return queryData
 }
 
 /**
@@ -510,8 +648,32 @@ export function queryInternal(world: World, terms: QueryTerm[], options: { buffe
  * @param {QueryTerm[]} terms - The query terms.
  * @param {...QueryModifier} modifiers - Query modifiers (asBuffer, isNested, etc.).
  * @returns {QueryResult} The result of the query.
+ * @description Hoist the terms array (define it once, outside your loop) to hit
+ * the term-identity cache and skip hashing entirely on repeat calls.
  */
 export function query(world: World, terms: QueryTerm[], ...modifiers: (QueryModifier | QueryOptions)[]): QueryResult {
+	const ctx = (world as InternalWorld)[$internal]
+
+	// Fast path: a hoisted terms array maps straight to its query by identity.
+	// The liveness check guards against queries evicted by removeQuery/removeEntity.
+	if (modifiers.length === 0) {
+		const cached = ctx.queryTermCache.get(terms)
+		if (cached && ctx.queries.has(cached)) {
+			commitRemovals(world)
+			return cached.dense as readonly EntityId[]
+		}
+	}
+
+	// Fast path: a single specific pair is cached by the pair component itself,
+	// so it skips hashing entirely. Same predicate registerQuery uses to fill
+	// pairQueryMap — they must agree or every call would register a new query.
+	if (terms.length === 1 && modifiers.length === 0 && isCacheablePairTerm(terms[0])) {
+		commitRemovals(world)
+		const cached = ctx.pairQueryMap.get(terms[0]) ?? registerQuery(world, terms)
+		ctx.queryTermCache.set(terms, cached)
+		return cached.dense as readonly EntityId[]
+	}
+
 	const hierarchyTerm = terms.find(term => term && typeof term === 'object' && $hierarchyType in term) as HierarchyTerm | undefined
 
 	let buffered = false, commit = true
@@ -536,7 +698,9 @@ export function query(world: World, terms: QueryTerm[], ...modifiers: (QueryModi
 	}
 
 	if (commit) commitRemovals(world)
-	return queryInternal(world, terms, { buffered })
+	const queryData = resolveQuery(world, terms, { buffered })
+	if (modifiers.length === 0) ctx.queryTermCache.set(terms, queryData)
+	return buffered ? queryData.dense as Readonly<Uint32Array> : queryData.dense as readonly EntityId[]
 }
 
 
@@ -697,9 +861,5 @@ export const removeQuery = (world: World, terms: QueryTerm[]) => {
 	const ctx = (world as InternalWorld)[$internal]
 	const hash = queryHash(world, terms)
 	const query = ctx.queriesHashMap.get(hash)
-	if (query) {
-		ctx.queries.delete(query)
-		ctx.queriesHashMap.delete(hash)
-		invalidateArchetypeTransitions(ctx)
-	}
+	if (query) removeQueryFromWorld(world, query)
 }

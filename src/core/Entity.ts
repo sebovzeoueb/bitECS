@@ -1,8 +1,10 @@
-import { addComponent, addComponents, removeComponent } from './Component'
+import { addComponent, addComponents, removeComponent, removeEntityPairs } from './Component'
 import {
 	queryAddEntity,
 	queryCheckEntity,
 	queryRemoveEntity,
+	removeQueryFromWorld,
+	dropObserverQueuesFor,
 } from './Query'
 import { $isPairComponent, $relation, $relationData } from './Relation'
 import { World } from "./World"
@@ -100,6 +102,10 @@ export const removeEntity = (world: World, eid: EntityId) => {
 			for (let i = 0; i < deferredOps.length; i++) deferredOps[i]()
 		}
 
+		// Clean up outgoing pair components: purge relation indexes and update
+		// pair-filtered queries before the entity's bitmask is cleared.
+		removeEntityPairs(world, ctx, currentEid)
+
 		// Remove entity from affected queries (via entity's component set)
 		const components = ctx.entityComponents[currentEid]
 		if (components) {
@@ -123,16 +129,27 @@ export const removeEntity = (world: World, eid: EntityId) => {
 					}
 				}
 			}
-			// Wildcard queries can't be found via component lookup
-			for (const q of ctx.queries) {
-				if (q.pairFilters.length > 0 && !visited.has(q)) {
-					queryRemoveEntity(world, q, currentEid)
-				}
-			}
 		}
 		// Also check notQueries (entity may match queries with only Not terms)
 		for (const q of ctx.notQueries) {
 			queryRemoveEntity(world, q, currentEid)
+		}
+
+		// Release queues observing pairs targeting this entity before their
+		// queries are evicted, so internal subscriptions stop counting.
+		dropObserverQueuesFor(world, currentEid)
+
+		// Release queries whose pair target is this entity, unless observers
+		// still listen for membership changes on them. Copy each set first:
+		// removeQueryFromWorld unindexes the query as it goes.
+		for (const index of [ctx.queriesByTarget, ctx.queriesByEntity]) {
+			const queries = index.get(currentEid)
+			if (!queries) continue
+			for (const q of Array.from(queries)) {
+				if (q.addObservable.count() === 0 && q.removeObservable.count() === 0) {
+					removeQueryFromWorld(world, q)
+				}
+			}
 		}
 
 		// Free the entity ID

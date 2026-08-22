@@ -24,6 +24,9 @@ export type ArchetypeEdge = {
     target: ArchetypeNode
     addTo: Query[]
     removeFrom: Query[]
+    // Query version this edge was computed under; a stale stamp means a
+    // query was registered or removed since, so the edge must be recomputed.
+    version: number
 }
 
 export type RelationEntry = { subject: EntityId, relation: ComponentRef }
@@ -41,15 +44,34 @@ export type WorldContext = {
     dirtyQueries: Set<any>
     entityArchetypes: ArchetypeNode[]
     rootArchetype: ArchetypeNode
+    // Canonical archetype nodes interned by mask signature, so entities with
+    // identical component masks share nodes (and their cached edges)
+    archetypeNodeMap: Map<string, ArchetypeNode>
     prefabData: ComponentData | null
+    // Bumped whenever a query is registered or removed; cached archetype
+    // edges are stamped with the version they were computed under and
+    // recomputed lazily when the stamp is stale.
+    queryVersion: number
     // Relation indexes
     relationTargets: (Map<ComponentRef, Set<any>> | null)[]
     reverseIndex: (RelationEntry[] | null)[]
     targetsByRelation: Map<ComponentRef, Set<EntityId>>
     pairsByTarget: Map<EntityId, ComponentRef[]>
-    // Observer queues (for queue/queuePeek)
-    observerQueues: Map<string, EntityId[]>
-    // Hierarchy tracking
+    // Pair-filtered query indexes: specific pairs by target, Wildcard(entity)
+    // by entity, Pair(Wildcard, Relation) by relation
+    queriesByTarget: Map<any, Set<Query>>
+    queriesByEntity: Map<EntityId, Set<Query>>
+    queriesByRelation: Map<ComponentRef, Set<Query>>
+    // O(1) cache for single specific-pair queries keyed by the pair component
+    // (ChildOf(eid) returns a stable object per target, so no hash string needed)
+    pairQueryMap: Map<ComponentRef, Query>
+    // Term-array-identity cache: hoisted query term arrays skip hashing entirely.
+    // Entries may go stale after removeQuery; callers must check ctx.queries.has()
+    queryTermCache: WeakMap<object, Query>
+    // Observer queues (for queue/queuePeek), with unsubscribe handles and
+    // per-target tracking so entity removal can drop queues for dead targets
+    observerQueues: Map<string, { buf: EntityId[], unsubscribe: () => void }>
+    observerQueuesByTarget: Map<EntityId, Set<string>>
     hierarchyData: Map<ComponentRef, {
         depths: Uint32Array
         dirty: SparseSet
@@ -66,9 +88,11 @@ export type InternalWorld = {
 
 export type World<T extends object = {}> = { [K in keyof T]: T[K] }
 
-const createArchetypeNode = (): ArchetypeNode => ({ edges: [] })
+export const createArchetypeNode = (): ArchetypeNode => ({ edges: [] })
 
-const createWorldContext = (entityIndex?: EntityIndex): WorldContext => ({
+const createWorldContext = (entityIndex?: EntityIndex): WorldContext => {
+    const rootArchetype = createArchetypeNode()
+    return {
     entityIndex: entityIndex || createEntityIndex(),
     entityMasks: [[]],
     entityComponents: [],
@@ -78,19 +102,28 @@ const createWorldContext = (entityIndex?: EntityIndex): WorldContext => ({
     queries: new Set(),
     queriesHashMap: new Map(),
     notQueries: new Set(),
+    queryVersion: 0,
     dirtyQueries: new Set(),
     entityArchetypes: [],
-    rootArchetype: createArchetypeNode(),
+    rootArchetype,
+    archetypeNodeMap: new Map([['', rootArchetype]]),
     prefabData: null,
     relationTargets: [],
     reverseIndex: [],
     targetsByRelation: new Map(),
     pairsByTarget: new Map(),
+    queriesByTarget: new Map(),
+    queriesByEntity: new Map(),
+    queriesByRelation: new Map(),
+    pairQueryMap: new Map(),
+    queryTermCache: new WeakMap(),
     observerQueues: new Map(),
+    observerQueuesByTarget: new Map(),
     hierarchyData: new Map(),
     hierarchyActiveRelations: new Set(),
     hierarchyQueryCache: new Map(),
-})
+    }
+}
 
 const createBaseWorld = <T extends object>(context?: T, entityIndex?: EntityIndex): World<T> =>
     defineHiddenProperty(

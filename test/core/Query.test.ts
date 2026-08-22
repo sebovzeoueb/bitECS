@@ -8,6 +8,7 @@ import {
 	query,
 	removeComponent,
 	removeEntity,
+	removeQuery,
 	entityExists,
 	Or,
 	And,
@@ -1192,5 +1193,88 @@ describe('New Query API Tests', () => {
 			// Performance check - should complete reasonably quickly (under 10ms for 50 entities)
 			expect(end - start).toBeLessThan(10)
 		})
+	})
+})
+
+describe('Query internals', () => {
+	it('should register exactly one pairFilter per pair term', () => {
+		const world = createWorld()
+		const ChildOf = createRelation()
+		const parent = addEntity(world)
+		query(world, [ChildOf(parent)])
+
+		const ctx = (world as any)[Symbol.for('bitecs_internal')]
+		for (const q of ctx.queries) {
+			expect(q.pairFilters.length).toBe(1)
+		}
+	})
+})
+
+describe('Query term-identity cache', () => {
+	it('should return fresh results for a hoisted terms array across add/remove', () => {
+		const world = createWorld()
+		const A = { v: [] as number[] }
+		const B = { v: [] as number[] }
+		const terms = [A, B]
+
+		const e1 = addEntity(world, A, B)
+		expect(query(world, terms)).toEqual([e1])
+		expect(query(world, terms)).toEqual([e1])
+
+		const e2 = addEntity(world, A, B)
+		expect([...query(world, terms)].sort()).toEqual([e1, e2].sort())
+
+		removeComponent(world, e1, B)
+		expect(query(world, terms)).toEqual([e2])
+
+		removeEntity(world, e2)
+		expect(query(world, terms)).toEqual([])
+	})
+
+	it('should survive removeQuery by re-registering', () => {
+		const world = createWorld()
+		const A = { v: [] as number[] }
+		const terms = [A]
+
+		const e1 = addEntity(world, A)
+		expect(query(world, terms)).toEqual([e1])
+
+		removeQuery(world, terms)
+		expect(query(world, terms)).toEqual([e1])
+	})
+})
+
+describe('Hierarchy internals', () => {
+	it('should not register new queries when reparenting subtrees', () => {
+		const world = createWorld()
+		const ChildOf = createRelation()
+
+		const root = addEntity(world)
+		const a = addEntity(world)
+		const b = addEntity(world)
+		const c = addEntity(world)
+		addComponent(world, a, ChildOf(root))
+		addComponent(world, b, ChildOf(a))
+		addComponent(world, c, ChildOf(b))
+
+		// First hierarchy query activates depth tracking and registers its own queries
+		query(world, [Hierarchy(ChildOf)])
+		const ctx = (world as any)[Symbol.for('bitecs_internal')]
+		const before = ctx.queries.size
+
+		// Reparent b's subtree under root, then under a again
+		removeComponent(world, b, ChildOf(a))
+		addComponent(world, b, ChildOf(root))
+		query(world, [Hierarchy(ChildOf)])
+		removeComponent(world, b, ChildOf(root))
+		addComponent(world, b, ChildOf(a))
+		const result = query(world, [Hierarchy(ChildOf)])
+
+		expect(ctx.queries.size).toBe(before)
+		// Depths still correct: parents before children
+		const order = [...result]
+		expect(order.indexOf(root)).toBeLessThan(order.indexOf(a))
+		expect(order.indexOf(a)).toBeLessThan(order.indexOf(b))
+		expect(order.indexOf(b)).toBeLessThan(order.indexOf(c))
 	})
 })

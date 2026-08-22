@@ -5,6 +5,7 @@ import {
 	IsA,
 	Wildcard,
 	isWildcard,
+	isRelation,
 	getRelationTargets,
 	$relationData,
 	$isPairComponent,
@@ -12,7 +13,7 @@ import {
 	$relation
 } from './Relation'
 import { createObservable, Observable } from './utils/Observer'
-import { $internal, InternalWorld, World, WorldContext, ArchetypeNode, ArchetypeEdge } from './World'
+import { $internal, InternalWorld, World, WorldContext, ArchetypeNode, ArchetypeEdge, createArchetypeNode } from './World'
 import { updateHierarchyDepth, invalidateHierarchyDepth } from './Hierarchy'
 
 /**
@@ -48,7 +49,34 @@ type ComponentSetter<T = any> = { component: ComponentRef; data: T }
 
 // ── Archetype Graph ──────────────────────────────────────────────────
 
-const createArchetypeNode = (): ArchetypeNode => ({ edges: [] })
+/**
+ * Returns the canonical archetype node for an entity's current component masks.
+ * Entities with identical masks share one node, so cached transition edges are
+ * computed once per archetype instead of once per entity. Trailing zero masks
+ * are trimmed so the key is stable as new generations are added to the world.
+ * @param {WorldContext} ctx - The world context.
+ * @param {EntityId} eid - The entity ID whose masks identify the archetype.
+ * @returns {ArchetypeNode} The interned archetype node.
+ */
+const internArchetypeNode = (ctx: WorldContext, eid: EntityId): ArchetypeNode => {
+	let key = ''
+	let pendingZeros = 0
+	for (let g = 0; g < ctx.entityMasks.length; g++) {
+		const mask = ctx.entityMasks[g][eid] | 0
+		if (mask === 0) {
+			pendingZeros++
+			continue
+		}
+		for (; pendingZeros > 0; pendingZeros--) key += '0,'
+		key += mask + ','
+	}
+	let node = ctx.archetypeNodeMap.get(key)
+	if (!node) {
+		node = createArchetypeNode()
+		ctx.archetypeNodeMap.set(key, node)
+	}
+	return node
+}
 
 /**
  * Gets or computes the transition edge for adding/removing a component.
@@ -72,8 +100,8 @@ const getTransitionEdge = (
 ): ArchetypeEdge => {
 	const action = componentData.id * 2 + (isAdd ? 1 : 0)
 
-	let edge = node.edges[action]
-	if (edge !== undefined) return edge
+	const edge = node.edges[action]
+	if (edge !== undefined && edge.version === ctx.queryVersion) return edge
 
 	const addTo: Query[] = []
 	const removeFrom: Query[] = []
@@ -86,9 +114,9 @@ const getTransitionEdge = (
 		else removeFrom.push(queryData)
 	}
 
-	edge = { target: createArchetypeNode(), addTo, removeFrom }
-	node.edges[action] = edge
-	return edge
+	// Intern the target by the entity's post-op masks (call sites update masks
+	// before transitioning), so identical archetypes share one node and its edges.
+	return node.edges[action] = { target: internArchetypeNode(ctx, eid), addTo, removeFrom, version: ctx.queryVersion }
 }
 
 /**
@@ -277,6 +305,18 @@ export const hasComponent = (world: World, eid: EntityId, component: ComponentRe
 			return (ctx.entityMasks[relData.generationId][eid] & relData.bitflag) === relData.bitflag
 		}
 
+		// Wildcard(Relation): check reverse index — is entity targeted via this relation?
+		// Mirrors queryCheckEntity's Pair(Wildcard, Relation) filter.
+		if (isWildcard(relation) && isRelation(target)) {
+			const rev = ctx.reverseIndex[eid]
+			if (rev) {
+				for (let i = 0; i < rev.length; i++) {
+					if (rev[i].relation === target) return true
+				}
+			}
+			return false
+		}
+
 		// Wildcard(X): check forward index — does entity have any relation targeting X?
 		if (isWildcard(relation)) {
 			const forward = ctx.relationTargets[eid]
@@ -404,52 +444,81 @@ const recursivelyInherit = (ctx: WorldContext, world: World, baseEid: EntityId, 
 // ── Wildcard Query Updates ───────────────────────────────────────
 
 /**
- * Updates wildcard queries (Wildcard(entity) and Pair(Wildcard, Relation))
- * when a pair is added or removed. These are the only queries that can't
- * use standard bitmask evaluation.
+ * Updates pair-filtered queries (specific pairs, Wildcard(entity), and
+ * Pair(Wildcard, Relation)) when a pair is added or removed. These are the
+ * only queries that can't use standard bitmask evaluation. Indexed lookups
+ * keep this O(matching queries) instead of O(all queries).
  */
 const updatePairQueries = (world: World, ctx: WorldContext, eid: EntityId, relation: ComponentRef, target: any, isAdd: boolean) => {
-	for (const q of ctx.queries) {
-		if (q.pairFilters.length === 0) continue
-		for (let i = 0; i < q.pairFilters.length; i++) {
-			const filter = q.pairFilters[i]
-			// Specific pair filter: Relation(specificTarget) — adds/removes eid
-			if ('target' in filter) {
-				if (filter.relation === relation && filter.target === target) {
-					if (isAdd) {
-						if (queryCheckEntity(world, q, eid)) queryAddEntity(q, eid)
-					} else {
-						if (!queryCheckEntity(world, q, eid)) queryRemoveEntity(world, q, eid)
-					}
-				}
-				continue
-			}
-			if (typeof target !== 'number') continue
-			// Wildcard(entity) — adds/removes target
-			if ('entity' in filter && filter.entity === eid) {
+	// Specific pair filter: Relation(specificTarget) — adds/removes eid.
+	// Indexed by target only, so the relation still has to be matched.
+	const byTarget = ctx.queriesByTarget.get(target)
+	if (byTarget) {
+		for (const q of byTarget) {
+			for (let i = 0; i < q.pairFilters.length; i++) {
+				const filter = q.pairFilters[i]
+				if (!('target' in filter) || filter.relation !== relation || filter.target !== target) continue
 				if (isAdd) {
-					queryAddEntity(q, target)
+					if (queryCheckEntity(world, q, eid)) queryAddEntity(q, eid)
 				} else {
-					let stillTargeted = false
-					const rt = ctx.relationTargets[eid]
-					if (rt) {
-						for (const [r] of rt) {
-							if (hasPairTarget(ctx, eid, r, target)) { stillTargeted = true; break }
-						}
-					}
-					if (!stillTargeted) queryRemoveEntity(world, q, target)
+					if (!queryCheckEntity(world, q, eid)) queryRemoveEntity(world, q, eid)
 				}
-			}
-			// Pair(Wildcard, Relation) — adds/removes target
-			if ('relation' in filter && filter.relation === relation) {
-				if (isAdd) {
-					queryAddEntity(q, target)
-				} else {
-					const relSet = ctx.targetsByRelation.get(relation)
-					if (!relSet || !relSet.has(target)) queryRemoveEntity(world, q, target)
-				}
+				break
 			}
 		}
+	}
+
+	if (typeof target !== 'number') return
+
+	// Wildcard(entity) — adds/removes target. Membership in the index is
+	// itself the match: a query is only keyed by eid via an { entity: eid }
+	// filter, so there is nothing left to re-check.
+	const byEntity = ctx.queriesByEntity.get(eid)
+	if (byEntity) {
+		for (const q of byEntity) {
+			if (isAdd) {
+				queryAddEntity(q, target)
+			} else {
+				let stillTargeted = false
+				const rt = ctx.relationTargets[eid]
+				if (rt) {
+					for (const [r] of rt) {
+						if (hasPairTarget(ctx, eid, r, target)) { stillTargeted = true; break }
+					}
+				}
+				if (!stillTargeted) queryRemoveEntity(world, q, target)
+			}
+		}
+	}
+
+	// Pair(Wildcard, Relation) — adds/removes target. Keyed only by
+	// { relation } filters, so membership is the match.
+	const byRelation = ctx.queriesByRelation.get(relation)
+	if (byRelation) {
+		for (const q of byRelation) {
+			if (isAdd) {
+				queryAddEntity(q, target)
+			} else {
+				const relSet = ctx.targetsByRelation.get(relation)
+				if (!relSet || !relSet.has(target)) queryRemoveEntity(world, q, target)
+			}
+		}
+	}
+}
+
+/**
+ * Cleans up all outgoing pair components of an entity being removed: purges
+ * the relation indexes and updates pair-filtered queries. Incoming pairs are
+ * handled separately by removeEntity's cascade.
+ */
+export const removeEntityPairs = (world: World, ctx: WorldContext, eid: EntityId) => {
+	const comps = ctx.entityComponents[eid]
+	if (!comps) return
+	for (let i = 0; i < comps.length; i++) {
+		const component = comps[i]
+		if (!component[$isPairComponent]) continue
+		removePairTarget(ctx, eid, component[$relation], component[$pairTarget])
+		updatePairQueries(world, ctx, eid, component[$relation], component[$pairTarget], false)
 	}
 }
 
@@ -606,8 +675,8 @@ export function addComponents(world: World, eid: EntityId, ...args: any[]): void
 		if (data !== undefined) componentData.setObservable.notify(eid, data)
 	}
 
-	// Invalidate archetype node — entity's component set changed
-	ctx.entityArchetypes[eid] = createArchetypeNode()
+	// Re-derive the entity's archetype node from its updated masks
+	ctx.entityArchetypes[eid] = internArchetypeNode(ctx, eid)
 
 	// One query evaluation pass
 	for (const q of queries) {
@@ -719,8 +788,8 @@ export function removeComponent(world: World, eid: EntityId, ...components: Comp
 		swapRemoveComponent(ctx, eid, component)
 	}
 
-	// Invalidate archetype node — entity's component set changed
-	ctx.entityArchetypes[eid] = createArchetypeNode()
+	// Re-derive the entity's archetype node from its updated masks
+	ctx.entityArchetypes[eid] = internArchetypeNode(ctx, eid)
 
 	// Only remove from queries during removal — never add (avoids cancelling pending removals)
 	for (const q of queries) {
