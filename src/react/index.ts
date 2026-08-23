@@ -14,9 +14,6 @@ import {
 	type ComponentRef,
 } from 'bitecs'
 
-// Global tick — incremented on every observed change to bust snapshots.
-let tick = 0
-
 // ── Context ───────────────────────────────────────────────────────────
 
 const WorldContext = createContext<World>(null!)
@@ -50,10 +47,15 @@ export const useWorld = (): World => useContext(WorldContext)
 export const useQuery = (...terms: QueryTerm[]): readonly EntityId[] => {
 	const world = useWorld()
 	const termsRef = useStableValue(terms)
+	// Per-hook version, incremented by this hook's own observers to bust its snapshot.
+	const version = useRef(0)
 
 	const subscribe = useCallback(
 		(notify: () => void) => {
-			const handler = () => { tick++; notify() }
+			// Entities may have changed while unsubscribed (remount, render gap);
+			// invalidate the cached snapshot so the next read recomputes
+			version.current++
+			const handler = () => { version.current++; notify() }
 			const unsub1 = observe(world, onAdd(...termsRef), handler)
 			const unsub2 = observe(world, onRemove(...termsRef), handler)
 			return () => { unsub1(); unsub2() }
@@ -63,9 +65,9 @@ export const useQuery = (...terms: QueryTerm[]): readonly EntityId[] => {
 
 	const getSnapshot = useMemo(() => {
 		let last: readonly EntityId[] | undefined
-		let lastTick = -1
+		let lastVersion = -1
 		return () => {
-			if (lastTick !== tick) {
+			if (lastVersion !== version.current) {
 				commitRemovals(world)
 				// query returns the live dense array; copy so the snapshot
 				// is stable and comparable across calls
@@ -77,7 +79,7 @@ export const useQuery = (...terms: QueryTerm[]): readonly EntityId[] => {
 				) {
 					last = Array.from(next)
 				}
-				lastTick = tick
+				lastVersion = version.current
 			}
 			return last!
 		}
@@ -130,7 +132,7 @@ const useObserve = (world: World, eid: EntityId, component: ComponentRef): void 
 	const subscribe = useCallback(
 		(notify: () => void) => {
 			const handler = (entity: EntityId) => {
-				if (entity === eid) { tick++; counter.current++; notify() }
+				if (entity === eid) { counter.current++; notify() }
 			}
 			const unsubs = [
 				observe(world, onAdd(component), handler),
