@@ -136,8 +136,6 @@ export type ArrayByType = {
   'eid': Uint32Array;
 }
 
-// ... existing code ...
-
 const arrayByTypeMap: { [key in Type]: any } = {
   'i8': Int8Array,
   'ui8': Uint8Array,
