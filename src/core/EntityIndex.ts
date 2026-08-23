@@ -24,26 +24,17 @@ export type EntityIndex = {
 
 /**
  * Extracts the entity ID from a versioned entity ID by stripping off the version.
- * @param {EntityIndex} index - The EntityIndex containing the masks.
- * @param {number} id - The versioned entity ID.
- * @returns {number} The entity ID without the version.
  */
 export const getId = (index: EntityIndex, id: number): number => id & index.entityMask;
 
 /**
  * Extracts the version from an entity ID.
- * @param {EntityIndex} index - The EntityIndex containing the masks and shifts.
- * @param {number} id - The entity ID.
- * @returns {number} The version.
  */
 export const getVersion = (index: EntityIndex, id: number): number => 
     (id >>> index.versionShift) & ((1 << index.versionBits) - 1);
 
 /**
  * Increments the version of an entity ID.
- * @param {EntityIndex} index - The EntityIndex containing the masks and shifts.
- * @param {number} id - The entity ID.
- * @returns {number} The new entity ID with incremented version.
  */
 export const incrementVersion = (index: EntityIndex, id: number): number => {
     const currentVersion = getVersion(index, id);
@@ -53,8 +44,6 @@ export const incrementVersion = (index: EntityIndex, id: number): number => {
 
 /**
  * Creates configuration options for entity ID recycling with versioning.
- * @param {number} [versionBits] - Optional number of bits to use for version numbers. Defaults to 8 if not specified.
- * @returns {object} Configuration object with versioning enabled and specified version bits.
  */
 export const withVersioning = (versionBits?: number) => ({
     versioning: true,
@@ -63,10 +52,6 @@ export const withVersioning = (versionBits?: number) => ({
 
 /**
  * Creates and initializes a new EntityIndex.
- * @param {object|function} [options] - Optional configuration object from withVersioning() or withVersioning function.
- * @param {boolean} options.versioning - Flag to enable versioning for recycled IDs.
- * @param {number} options.versionBits - Number of bits to use for versioning (default: 8).
- * @returns {EntityIndex} A new EntityIndex object.
  */
 export const createEntityIndex = (options?: ReturnType<typeof withVersioning> | typeof withVersioning): EntityIndex => {
     const config = options 
@@ -98,15 +83,12 @@ export const createEntityIndex = (options?: ReturnType<typeof withVersioning> | 
 
 /**
  * Adds a new entity ID to the index or recycles an existing one.
- * @param {EntityIndex} index - The EntityIndex to add to.
- * @returns {number} The new or recycled entity ID.
  */
 export const addEntityId = (index: EntityIndex): number => {
     if (index.aliveCount < index.dense.length) {
         // Recycle id
         const recycledId = index.dense[index.aliveCount];
-        const entityId = recycledId;
-        index.sparse[entityId] = index.aliveCount;
+        index.sparse[getId(index, recycledId)] = index.aliveCount;
         index.aliveCount++;
         return recycledId;
     }
@@ -122,11 +104,11 @@ export const addEntityId = (index: EntityIndex): number => {
 
 /**
  * Removes an entity ID from the index.
- * @param {EntityIndex} index - The EntityIndex to remove from.
- * @param {number} id - The entity ID to remove.
  */
 export const removeEntityId = (index: EntityIndex, id: number): void => {
-    const denseIndex = index.sparse[id];
+    // sparse is keyed by the stripped id everywhere (see isEntityIdAlive);
+    // versioned ids share one slot per entity
+    const denseIndex = index.sparse[getId(index, id)];
     if (denseIndex === undefined || denseIndex >= index.aliveCount) {
         // Entity is not alive or doesn't exist, nothing to be done
         return;
@@ -136,11 +118,11 @@ export const removeEntityId = (index: EntityIndex, id: number): void => {
     const lastId = index.dense[lastIndex];
 
     // Swap with the last element
-    index.sparse[lastId] = denseIndex;
+    index.sparse[getId(index, lastId)] = denseIndex;
     index.dense[denseIndex] = lastId;
 
     // Update the removed entity's record
-    index.sparse[id] = lastIndex; // Set to lastIndex instead of undefined
+    index.sparse[getId(index, id)] = lastIndex; // Set to lastIndex instead of undefined
     index.dense[lastIndex] = id; // Keep the original id, don't strip version
 
     // Version the ID if enabled
@@ -154,9 +136,6 @@ export const removeEntityId = (index: EntityIndex, id: number): void => {
 
 /**
  * Checks if an entity ID is currently alive in the index.
- * @param {EntityIndex} index - The EntityIndex to check.
- * @param {number} id - The entity ID to check.
- * @returns {boolean} True if the entity ID is alive, false otherwise.
  */
 export const isEntityIdAlive = (index: EntityIndex, id: number): boolean => {
     const entityId = getId(index, id);

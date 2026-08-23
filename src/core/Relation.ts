@@ -5,45 +5,35 @@ import { defineHiddenProperty } from './utils/defineHiddenProperty'
 
 /**
  * Callback function type for when a target is removed from a relation.
- * @callback OnTargetRemovedCallback
- * @param {number} subject - The subject entity ID.
- * @param {number} target - The target entity ID.
  */
 export type OnTargetRemovedCallback = (subject: EntityId, target: EntityId) => void
 
 /**
  * Possible types for a relation target.
- * @typedef {number | '*' | typeof Wildcard} RelationTarget
  */
 export type RelationTarget = number | '*' | typeof Wildcard
 /**
  * Symbol for accessing the relation of a component.
- * @type {Symbol}
  */
 export const $relation = Symbol.for('bitecs-relation')
 
 /**
  * Symbol for accessing the pair target of a component.
- * @type {Symbol}
  */
 export const $pairTarget = Symbol.for('bitecs-pairTarget')
 
 /**
  * Symbol for checking if a component is a pair component.
- * @type {Symbol}
  */
 export const $isPairComponent = Symbol.for('bitecs-isPairComponent')
 
 /**
  * Symbol for accessing the relation data of a component.
- * @type {Symbol}
  */
 export const $relationData = Symbol.for('bitecs-relationData')
 
 /**
  * Interface for relation data.
- * @interface RelationData
- * @template T
  */
 type RelationData<T> = {
     pairsMap: Map<number | string | Relation<any>, WeakRef<T & object>>
@@ -64,17 +54,11 @@ const pairFinalizer = new FinalizationRegistry<{ pairsMap: Map<any, WeakRef<any>
 
 /**
  * Type definition for a Relation function.
- * @template T
- * @typedef {function} Relation
- * @param {RelationTarget} target - The target of the relation.
- * @returns {T} The relation component.
  */
 export type Relation<T> = (target: RelationTarget) => T
 
 /**
  * Creates a base relation.
- * @template T
- * @returns {Relation<T>} The created base relation.
  */
 const createBaseRelation = <T>(): Relation<T> => {
     const data = {
@@ -107,9 +91,6 @@ const createBaseRelation = <T>(): Relation<T> => {
 
 /**
  * Adds a store to a relation.
- * @template T
- * @param {function(): T} createStore - Function to create the store.
- * @returns {function(Relation<T>): Relation<T>} A function that modifies the relation.
  */
 export const withStore = <T>(createStore: (eid: EntityId) => T) => (relation: Relation<T>): Relation<T> => {
     const ctx = relation[$relationData] as RelationData<T>
@@ -119,9 +100,6 @@ export const withStore = <T>(createStore: (eid: EntityId) => T) => (relation: Re
 
 /**
  * Makes a relation exclusive.
- * @template T
- * @param {Relation<T>} relation - The relation to make exclusive.
- * @returns {Relation<T>} The modified relation.
  */
 export const makeExclusive = <T>(relation: Relation<T>): Relation<T> => {
     const ctx = relation[$relationData] as RelationData<T>
@@ -131,9 +109,6 @@ export const makeExclusive = <T>(relation: Relation<T>): Relation<T> => {
 
 /**
  * Adds auto-remove subject behavior to a relation.
- * @template T
- * @param {Relation<T>} relation - The relation to modify.
- * @returns {Relation<T>} The modified relation.
  */
 export const withAutoRemoveSubject = <T>(relation: Relation<T>): Relation<T> => {
     const ctx = relation[$relationData] as RelationData<T>
@@ -143,9 +118,6 @@ export const withAutoRemoveSubject = <T>(relation: Relation<T>): Relation<T> => 
 
 /**
  * Adds an onTargetRemoved callback to a relation.
- * @template T
- * @param {OnTargetRemovedCallback} onRemove - The callback to add.
- * @returns {function(Relation<T>): Relation<T>} A function that modifies the relation.
  */
 export const withOnTargetRemoved = <T>(onRemove: OnTargetRemovedCallback) => (relation: Relation<T>): Relation<T> => {
     const ctx = relation[$relationData] as RelationData<T>
@@ -155,11 +127,6 @@ export const withOnTargetRemoved = <T>(onRemove: OnTargetRemovedCallback) => (re
 
 /**
  * Creates a pair from a relation and a target.
- * @template T
- * @param {Relation<T>} relation - The relation.
- * @param {RelationTarget} target - The target.
- * @returns {T} The created pair.
- * @throws {Error} If the relation is undefined.
  */
 export const Pair = <T>(relation: Relation<T>, target: RelationTarget): T => {
     if (relation === undefined) throw Error('Relation is undefined')
@@ -168,10 +135,6 @@ export const Pair = <T>(relation: Relation<T>, target: RelationTarget): T => {
 
 /**
  * Gets the relation targets for an entity.
- * @param {World} world - The world object.
- * @param {Relation<any>} relation - The relation to get targets for.
- * @param {number} eid - The entity ID.
- * @returns {Array<any>} An array of relation targets.
  */
 export const getRelationTargets = (world: World, eid: EntityId, relation: Relation<any>): number[] => {
 	const ctx = (world as InternalWorld)[$internal]
@@ -181,21 +144,11 @@ export const getRelationTargets = (world: World, eid: EntityId, relation: Relati
 
 /**
  * Creates a new relation.
- * @template T
- * @param {...Array<function(Relation<T>): Relation<T>>} modifiers - Modifier functions for the relation.
- * @returns {Relation<T>} The created relation.
  */
 export function createRelation<T>(...modifiers: Array<(relation: Relation<T>) => Relation<T>>): Relation<T>
 
 /**
  * Creates a new relation with options.
- * @template T
- * @param {Object} options - Options for creating the relation.
- * @param {function(): T} [options.store] - Function to create the store.
- * @param {boolean} [options.exclusive] - Whether the relation is exclusive.
- * @param {boolean} [options.autoRemoveSubject] - Whether to auto-remove the subject.
- * @param {OnTargetRemovedCallback} [options.onTargetRemoved] - Callback for when a target is removed.
- * @returns {Relation<T>} The created relation.
  */
 export function createRelation<T>(options: {
     store?: () => T
@@ -242,7 +195,6 @@ const getGlobalRelation = (key: string, init: () => any) => {
 
 /**
  * Wildcard relation — matches any target in queries and hasComponent checks.
- * @type {Relation<any>}
  */
 export const Wildcard: Relation<any> = getGlobalRelation('bitecs-global-wildcard', () => {
     const relation = createBaseRelation()
@@ -252,14 +204,11 @@ export const Wildcard: Relation<any> = getGlobalRelation('bitecs-global-wildcard
 
 /**
  * IsA relation — used for component inheritance between entities.
- * @type {Relation<any>}
  */
 export const IsA: Relation<any> = getGlobalRelation('bitecs-global-isa', createBaseRelation)
 
 /**
  * Checks if a relation is a wildcard relation.
- * @param {any} relation - The relation to check.
- * @returns {boolean} True if the relation is a wildcard relation, false otherwise.
  */
 export function isWildcard(relation: any): boolean {
     return relation ? relation[$wildcard] === true : false
@@ -267,8 +216,6 @@ export function isWildcard(relation: any): boolean {
 
 /**
  * Checks if a component is a relation.
- * @param {any} component - The component to check.
- * @returns {boolean} True if the component is a relation, false otherwise.
  */
 export function isRelation(component: any): boolean {
     return component ? component[$relationData] !== undefined : false

@@ -1,7 +1,7 @@
 import { World, InternalWorld, $internal } from './World'
 import { EntityId } from './Entity'
 import { ComponentRef } from './Component'
-import { getRelationTargets, Wildcard } from './Relation'
+import { Wildcard } from './Relation'
 import { query, queryHash, queryInternal, type QueryResult } from './Query'
 import { createSparseSet, createUint32SparseSet, type SparseSet } from './utils/SparseSet'
 
@@ -103,17 +103,21 @@ function getHierarchyData(world: World, relation: ComponentRef): HierarchyData {
  * Populates depth calculations for all existing entities with this relation
  */
 function populateExistingDepths(world: World, relation: ComponentRef): void {
+    const ctx = (world as InternalWorld)[$internal]
     const entitiesWithRelation = query(world, [relation(Wildcard)])
-    
+
     // Calculate depths for entities with this relation
     for (const entity of entitiesWithRelation) {
         getEntityDepth(world, relation, entity)
     }
-    
-    // Calculate depths for all relation targets (avoid extra allocation)
+
+    // Calculate depths for all relation targets (iterate the live Sets, no copies;
+    // depth computation only reads relation state)
     const processedTargets = new Set<EntityId>()
     for (const entity of entitiesWithRelation) {
-        for (const target of getRelationTargets(world, entity, relation)) {
+        const targets = ctx.relationTargets[entity]?.get(relation)
+        if (!targets) continue
+        for (const target of targets) {
             if (!processedTargets.has(target)) {
                 processedTargets.add(target)
                 getEntityDepth(world, relation, target)
@@ -125,8 +129,6 @@ function populateExistingDepths(world: World, relation: ComponentRef): void {
 /**
  * Ensures depth tracking is initialized for a relation. This must be called before
  * using hierarchy features for a specific relation component.
- * @param {World} world - The world object.
- * @param {ComponentRef} relation - The relation component to initialize tracking for.
  */
 export function ensureDepthTracking(world: World, relation: ComponentRef): void {
     const ctx = (world as InternalWorld)[$internal]
@@ -148,20 +150,17 @@ export function ensureDepthTracking(world: World, relation: ComponentRef): void 
 /**
  * Calculates the hierarchy depth of an entity for a given relation. Depth is measured
  * as the distance from the root entities (entities with no parent relations).
- * @param {World} world - The world object.
- * @param {ComponentRef} relation - The relation component to calculate depth for.
- * @param {EntityId} entity - The entity ID to calculate depth for.
- * @param {Set<EntityId>} [visited] - Internal set to track visited entities for cycle detection.
- * @returns {number} The hierarchy depth of the entity.
  */
 export function calculateEntityDepth(world: World, relation: ComponentRef, entity: EntityId, visited = new Set<EntityId>()): number {
     if (visited.has(entity)) return 0
     visited.add(entity)
     
-    const targets = getRelationTargets(world, entity, relation)
-    if (targets.length === 0) return 0
-    if (targets.length === 1) return getEntityDepthWithVisited(world, relation, targets[0], visited) + 1
-    
+    // Read the live target Set directly (no copy); depth traversal never mutates it
+    const ctx = (world as InternalWorld)[$internal]
+    const targets = ctx.relationTargets[entity]?.get(relation)
+    if (!targets || targets.size === 0) return 0
+    if (targets.size === 1) return getEntityDepthWithVisited(world, relation, targets.values().next().value, visited) + 1
+
     let minDepth = Infinity
     for (const target of targets) {
         const depth = getEntityDepthWithVisited(world, relation, target, visited)
@@ -218,11 +217,6 @@ function forEachChild(world: World, relation: ComponentRef, parent: EntityId, fn
 /**
  * Marks an entity and its children as needing depth recalculation. This is used
  * internally when hierarchy changes occur.
- * @param {World} world - The world object.
- * @param {ComponentRef} relation - The relation component.
- * @param {EntityId} parent - The parent entity ID.
- * @param {SparseSet} dirty - The set to mark dirty entities in.
- * @param {SparseSet} [visited] - Internal set to track visited entities for cycle detection.
  */
 export function markChildrenDirty(world: World, relation: ComponentRef, parent: EntityId, dirty: SparseSet, visited = createSparseSet()): void {
     if (visited.has(parent)) return
@@ -237,11 +231,6 @@ export function markChildrenDirty(world: World, relation: ComponentRef, parent: 
 /**
  * Updates hierarchy depth when a relation is added. This function is called automatically
  * when components are added to maintain accurate depth tracking.
- * @param {World} world - The world object.
- * @param {ComponentRef} relation - The relation component.
- * @param {EntityId} entity - The entity ID that had a relation added.
- * @param {EntityId} [parent] - The parent entity ID in the relation.
- * @param {Set<EntityId>} [updating] - Internal set to track entities being updated.
  */
 export function updateHierarchyDepth(
     world: World, 
@@ -293,9 +282,6 @@ export function updateHierarchyDepth(
 /**
  * Invalidates hierarchy depth when a relation is removed. This function is called automatically
  * when components are removed to maintain accurate depth tracking.
- * @param {World} world - The world object.
- * @param {ComponentRef} relation - The relation component.
- * @param {EntityId} entity - The entity ID that had a relation removed.
  */
 export function invalidateHierarchyDepth(world: World, relation: ComponentRef, entity: EntityId): void {
     const ctx = (world as InternalWorld)[$internal]
@@ -343,8 +329,6 @@ function invalidateSubtree(world: World, relation: ComponentRef, entity: EntityI
 /**
  * Processes all dirty depth calculations for a relation. This ensures all cached
  * depth values are up to date before performing hierarchy operations.
- * @param {World} world - The world object.
- * @param {ComponentRef} relation - The relation component to flush dirty depths for.
  */
 export function flushDirtyDepths(world: World, relation: ComponentRef): void {
     const ctx = (world as InternalWorld)[$internal]
@@ -370,12 +354,6 @@ export function flushDirtyDepths(world: World, relation: ComponentRef): void {
 /**
  * Query entities in hierarchical order (depth-based ordering). Returns entities grouped by depth:
  * all depth 0, then depth 1, then depth 2, etc. This ensures parents always come before their children.
- * @param {World} world - The world object.
- * @param {ComponentRef} relation - The relation component that defines the hierarchy.
- * @param {ComponentRef[]} components - Additional components to filter by.
- * @param {Object} [options] - Query options.
- * @param {boolean} [options.buffered] - Whether to return results as Uint32Array instead of number[].
- * @returns {QueryResult} Array or Uint32Array of entity IDs in hierarchical order.
  */
 export function queryHierarchy(world: World, relation: ComponentRef, components: ComponentRef[], options: { buffered?: boolean } = {}): QueryResult {
     const ctx = (world as InternalWorld)[$internal]
@@ -417,12 +395,6 @@ export function queryHierarchy(world: World, relation: ComponentRef, components:
 
 /**
  * Get all entities at a specific depth level in the hierarchy.
- * @param {World} world - The world object.
- * @param {ComponentRef} relation - The relation component that defines the hierarchy.
- * @param {number} depth - The specific depth level to query (0 = root level).
- * @param {Object} [options] - Query options.
- * @param {boolean} [options.buffered] - Whether to return results as Uint32Array instead of number[].
- * @returns {QueryResult} Array or Uint32Array of entity IDs at the specified depth.
  */
 export function queryHierarchyDepth(world: World, relation: ComponentRef, depth: number, options: { buffered?: boolean } = {}): QueryResult {
     // Ensure hierarchy is active and get data
@@ -440,10 +412,6 @@ export function queryHierarchyDepth(world: World, relation: ComponentRef, depth:
 
 /**
  * Get the hierarchy depth of a specific entity for a given relation.
- * @param {World} world - The world object.
- * @param {EntityId} entity - The entity ID to get depth for.
- * @param {ComponentRef} relation - The relation component that defines the hierarchy.
- * @returns {number} The depth of the entity (0 = root level, higher numbers = deeper).
  */
 export function getHierarchyDepth(world: World, entity: EntityId, relation: ComponentRef): number {
     getHierarchyData(world, relation)
@@ -452,9 +420,6 @@ export function getHierarchyDepth(world: World, entity: EntityId, relation: Comp
 
 /**
  * Get the maximum depth in the hierarchy for a given relation.
- * @param {World} world - The world object.
- * @param {ComponentRef} relation - The relation component that defines the hierarchy.
- * @returns {number} The maximum depth found in the hierarchy.
  */
 export function getMaxHierarchyDepth(world: World, relation: ComponentRef): number {
     const hierarchyData = getHierarchyData(world, relation)

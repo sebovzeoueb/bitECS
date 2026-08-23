@@ -7,44 +7,28 @@ import { queryHierarchy, queryHierarchyDepth } from './Hierarchy'
 import { $isPairComponent, $relation, $pairTarget, Wildcard, isWildcard, isRelation } from './Relation'
 
 /**
- * @typedef {Readonly<Uint32Array> | readonly EntityId[]} QueryResult
- * @description The result of a query as a readonly array of entity IDs.
+ * The result of a query as a readonly array of entity IDs.
  */
 export type QueryResult = Readonly<Uint32Array> | readonly EntityId[]
 
 /**
- * @typedef {Object} QueryOptions
- * @description Options for configuring query behavior.
- * @property {boolean} [commit=true] - Whether to commit pending entity removals before querying.
- * @property {boolean} [buffered=false] - Whether to return results as Uint32Array instead of number[].
+ * Options for configuring query behavior.
+ * @deprecated Pass symbol modifiers (asBuffer, noCommit) to query() instead.
+ * Options objects are silently ignored when any symbol modifier is present.
  */
 export interface QueryOptions {
 	commit?: boolean
 	buffered?: boolean
 }
 
-/**
- * @typedef {Object} Query
- * @description Represents a query in the ECS using original blazing-fast bitmask evaluation.
- * @property {ComponentRef[]} allComponents - All components referenced in the query.
- * @property {ComponentRef[]} orComponents - Components in an OR relationship.
- * @property {ComponentRef[]} notComponents - Components that should not be present.
- * @property {Record<number, number>} masks - Bitmasks for each component generation.
- * @property {Record<number, number>} orMasks - OR bitmasks for each component generation.
- * @property {Record<number, number>} notMasks - NOT bitmasks for each component generation.
- * @property {Record<number, number>} hasMasks - HAS bitmasks for each component generation.
- * @property {number[]} generations - Component generations.
- * @property {SparseSet} toRemove - Set of entities to be removed.
- * @property {ReturnType<typeof createObservable>} addObservable - Observable for entity additions.
- * @property {ReturnType<typeof createObservable>} removeObservable - Observable for entity removals.
- */
 export type SpecificPairFilter = { relation: ComponentRef, target: any }
 export type PairFilter = { entity: EntityId } | { relation: ComponentRef } | SpecificPairFilter
 
+/**
+ * Represents a registered query: a SparseSet of matching entities plus the
+ * compiled bitmasks and pair filters used to keep membership up to date.
+ */
 export type Query = SparseSet & {
-	allComponents: ComponentRef[]
-	orComponents: ComponentRef[]
-	notComponents: ComponentRef[]
 	masks: Record<number, number>
 	orMasks: Record<number, number>
 	notMasks: Record<number, number>
@@ -62,43 +46,32 @@ export type Query = SparseSet & {
 }
 
 /**
- * @typedef {'Or' | 'And' | 'Not'} QueryOperatorType
- * @description Types of query operators.
+ * Types of query operators.
  */
 export type QueryOperatorType = 'Or' | 'And' | 'Not'
+
 /**
  * Symbol for query operator type.
- * @type {Symbol}
  */
 export const $opType = Symbol.for('bitecs-opType')
 
 /**
  * Symbol for query operator terms.
- * @type {Symbol}
  */
 export const $opTerms = Symbol.for('bitecs-opTerms')
 
-/**
- * @typedef {Object} OpReturnType
- * @property {symbol} [$opType] - The type of the operator.
- * @property {symbol} [$opTerms] - The components involved in the operation.
- */
 export type OpReturnType = {
 	[$opType]: string
 	[$opTerms]: ComponentRef[]
 }
 
 /**
- * @typedef {Function} QueryOperator
- * @description A function that creates a query operator.
- * @param {...ComponentRef} components - The components to apply the operator to.
- * @returns {OpReturnType} The result of the operator.
+ * A function that creates a query operator.
  */
 export type QueryOperator = (...components: ComponentRef[]) => OpReturnType
 
 /**
- * @typedef {ComponentRef | QueryOperator | HierarchyTerm} QueryTerm
- * @description A term in a query, either a component reference, query operator, or hierarchy term.
+ * A term in a query, either a component reference, query operator, or hierarchy term.
  */
 export type QueryTerm = ComponentRef | QueryOperator | HierarchyTerm
 
@@ -118,11 +91,7 @@ export const $hierarchyRel = Symbol.for('bitecs-hierarchyRel')
 export const $hierarchyDepth = Symbol.for('bitecs-hierarchyDepth')
 
 /**
- * @typedef {Object} HierarchyTerm
- * @description Represents a hierarchy query term for topological ordering.
- * @property {symbol} [$hierarchyType] - Always 'Hierarchy'.
- * @property {ComponentRef} [$hierarchyRel] - The relation component for hierarchy.
- * @property {number} [$hierarchyDepth] - Optional depth limit.
+ * Represents a hierarchy query term for topological ordering.
  */
 export type HierarchyTerm = {
 	[$hierarchyType]: 'Hierarchy'
@@ -131,11 +100,7 @@ export type HierarchyTerm = {
 }
 
 /**
- * @function Hierarchy
- * @description Creates a hierarchy query term for topological ordering (parents before children).
- * @param {ComponentRef} relation - The relation component (e.g., ChildOf).
- * @param {number} [depth] - Optional depth limit.
- * @returns {HierarchyTerm} The hierarchy term.
+ * Creates a hierarchy query term for topological ordering (parents before children).
  */
 export const Hierarchy = (relation: ComponentRef, depth?: number): HierarchyTerm => ({
 	[$hierarchyType]: 'Hierarchy',
@@ -144,11 +109,7 @@ export const Hierarchy = (relation: ComponentRef, depth?: number): HierarchyTerm
 })
 
 /**
- * @function Cascade
- * @description Alias for Hierarchy - creates a hierarchy query term for topological ordering.
- * @param {ComponentRef} relation - The relation component (e.g., ChildOf).
- * @param {number} [depth] - Optional depth limit.
- * @returns {HierarchyTerm} The hierarchy term.
+ * Alias for Hierarchy - creates a hierarchy query term for topological ordering.
  */
 export const Cascade = Hierarchy
 
@@ -156,9 +117,7 @@ export const Cascade = Hierarchy
 export const $modifierType = Symbol.for('bitecs-modifierType')
 
 /**
- * @typedef {Object} QueryModifier
- * @description Represents a query modifier that can be mixed into query terms.
- * @property {symbol} [$modifierType] - The type of modifier ('buffer' | 'nested').
+ * Represents a query modifier that can be mixed into query terms.
  */
 export type QueryModifier = {
 	[$modifierType]: 'buffer' | 'nested'
@@ -169,10 +128,7 @@ export const isNested: QueryModifier = { [$modifierType]: 'nested' }
 export const noCommit = isNested
 
 /**
- * @typedef {Function} ObservableHook
- * @description A function that creates an observable hook for queries.
- * @param {...QueryTerm} terms - The query terms to observe.
- * @returns {{type: 'add' | 'remove' | 'set', terms: QueryTerm[]}} The observable hook configuration.
+ * A function that creates an observable hook for queries.
  */
 export type ObservableHookDef = (...terms: QueryTerm[]) => {
 	[$opType]: 'add' | 'remove' | 'set' | 'get'
@@ -188,12 +144,7 @@ export const onSet: ObservableHookDef = (component: ComponentRef) => ({ [$opType
 export const onGet: ObservableHookDef = (component: ComponentRef) => ({ [$opType]: 'get', [$opTerms]: [component] })
 
 /**
- * @function observe
- * @description Observes changes in entities based on specified components.
- * @param {World} world - The world object.
- * @param {ObservableHook} hook - The observable hook.
- * @param {function(number): any} callback - The callback function to execute when changes occur.
- * @returns {function(): void} A function to unsubscribe from the observation.
+ * Observes changes in entities based on specified components.
  */
 export function observe(world: World, hook: ObservableHook, callback: (eid: EntityId, ...args: any[]) => any): () => void {
 	const ctx = (world as InternalWorld)[$internal]
@@ -285,9 +236,6 @@ export const dropObserverQueuesFor = (world: World, target: EntityId) => {
 /**
  * Returns entities that matched the observer hook since last drain, then clears the queue.
  * Auto-registers the observer on first call. Cached by hook type + terms.
- * @param {World} world - The world object.
- * @param {ObservableHook} hook - The observer hook (onAdd, onRemove, onSet, onGet).
- * @returns {EntityId[]} Array of entity IDs accumulated since last drain.
  */
 export const queueDrain = (world: World, hook: ObservableHook): EntityId[] => {
 	const buf = getObserverQueue(world, hook)
@@ -298,9 +246,6 @@ export const queueDrain = (world: World, hook: ObservableHook): EntityId[] => {
 
 /**
  * Returns entities that matched the observer hook since last drain WITHOUT clearing the queue.
- * @param {World} world - The world object.
- * @param {ObservableHook} hook - The observer hook (onAdd, onRemove, onSet, onGet).
- * @returns {EntityId[]} Array of entity IDs accumulated since last drain.
  */
 export const queuePeek = (world: World, hook: ObservableHook): EntityId[] => {
 	return getObserverQueue(world, hook).slice()
@@ -310,11 +255,7 @@ export const queue = queueDrain
 export const peek = queuePeek
 
 /**
- * @function queryHash
- * @description Generates a hash for a query based on its terms.
- * @param {World} world - The world object.
- * @param {QueryTerm[]} terms - The query terms.
- * @returns {string} The generated hash.
+ * Generates a hash for a query based on its terms.
  */
 export const queryHash = (world: World, terms: QueryTerm[]): string => {
 	const ctx = (world as InternalWorld)[$internal]
@@ -411,13 +352,7 @@ const isCacheablePairTerm = (term: QueryTerm): boolean =>
 	term[$isPairComponent] && !isWildcard(term[$relation]) && term[$pairTarget] !== Wildcard
 
 /**
- * @function registerQuery  
- * @description Registers a new query in the world using unified clause-mask compilation.
- * @param {World} world - The world object.
- * @param {QueryTerm[]} terms - The query terms.
- * @param {Object} [options] - Additional options.
- * @param {boolean} [options.buffered] - Whether the query should be buffered.
- * @returns {Query} The registered query.
+ * Registers a new query in the world using unified clause-mask compilation.
  */
 export const registerQuery = (world: World, terms: QueryTerm[], options: { buffered?: boolean } = {}): Query => {
 	const ctx = (world as InternalWorld)[$internal]
@@ -514,7 +449,7 @@ export const registerQuery = (world: World, terms: QueryTerm[], options: { buffe
 	const isSingleSpecificPair = !options.buffered && terms.length === 1 && isCacheablePairTerm(terms[0])
 
 	const query = Object.assign(options.buffered ? createUint32SparseSet() : createSparseSet(), {
-		allComponents: queryComponents, orComponents, notComponents, masks, notMasks, orMasks, hasMasks, hasOrTerms, generations,
+		masks, notMasks, orMasks, hasMasks, hasOrTerms, generations,
 		toRemove: createSparseSet(), addObservable: createObservable(), removeObservable: createObservable(), queues: {},
 		pairFilters, componentsData: allComponentsData, hash,
 		pairComponent: isSingleSpecificPair ? terms[0] : undefined
@@ -613,13 +548,7 @@ const populateByScan = (world: World, ctx: InternalWorld[typeof $internal], quer
 
 
 /**
- * @function queryInternal
- * @description Internal implementation for nested queries.
- * @param {World} world - The world object.
- * @param {QueryTerm[]} terms - The query terms.
- * @param {Object} [options] - Additional options.
- * @param {boolean} [options.buffered] - Whether the query should be buffered.
- * @returns {QueryResult} The result of the query.
+ * Internal implementation for nested queries.
  */
 export function queryInternal(world: World, terms: QueryTerm[], options: { buffered?: boolean } = {}): QueryResult {
 	const queryData = resolveQuery(world, terms, options)
@@ -642,14 +571,12 @@ const resolveQuery = (world: World, terms: QueryTerm[], options: { buffered?: bo
 }
 
 /**
- * @function query
- * @description Performs a unified query operation with configurable options.
- * @param {World} world - The world object.
- * @param {QueryTerm[]} terms - The query terms.
- * @param {...QueryModifier} modifiers - Query modifiers (asBuffer, isNested, etc.).
- * @returns {QueryResult} The result of the query.
- * @description Hoist the terms array (define it once, outside your loop) to hit
+ * Performs a unified query operation with configurable options.
+ * Hoist the terms array (define it once, outside your loop) to hit
  * the term-identity cache and skip hashing entirely on repeat calls.
+ * Modifiers are symbol modifiers (asBuffer, noCommit). Passing a plain
+ * QueryOptions object is deprecated and ignored when any symbol modifier
+ * is present.
  */
 export function query(world: World, terms: QueryTerm[], ...modifiers: (QueryModifier | QueryOptions)[]): QueryResult {
 	const ctx = (world as InternalWorld)[$internal]
@@ -680,11 +607,12 @@ export function query(world: World, terms: QueryTerm[], ...modifiers: (QueryModi
 	const hasModifiers = modifiers.some(m => m && typeof m === 'object' && $modifierType in m)
 
 	for (const modifier of modifiers) {
-		if (hasModifiers && modifier && typeof modifier === 'object' && $modifierType in modifier) {
-			const mod = modifier as QueryModifier
-			if (mod[$modifierType] === 'buffer') buffered = true
-			if (mod[$modifierType] === 'nested') commit = false
-		} else if (!hasModifiers) {
+		if (hasModifiers) {
+			// Symbol modifiers win; plain options objects are ignored (deprecated form)
+			const type = (modifier as QueryModifier)?.[$modifierType]
+			if (type === 'buffer') buffered = true
+			else if (type === 'nested') commit = false
+		} else {
 			const opts = modifier as QueryOptions
 			if (opts.buffered !== undefined) buffered = opts.buffered
 			if (opts.commit !== undefined) commit = opts.commit
@@ -706,12 +634,7 @@ export function query(world: World, terms: QueryTerm[], ...modifiers: (QueryModi
 
 
 /**
- * @function queryCheckEntity
- * @description Original blazing-fast query evaluation using simple bitmasks.
- * @param {World} world - The world object.
- * @param {Query} query - The query to check against.
- * @param {number} eid - The entity ID to check.
- * @returns {boolean} True if the entity matches the query, false otherwise.
+ * Original blazing-fast query evaluation using simple bitmasks.
  */
 export function queryCheckEntity(world: World, query: Query, eid: EntityId): boolean {
 	const ctx = (world as InternalWorld)[$internal]
@@ -772,11 +695,7 @@ export function queryCheckEntity(world: World, query: Query, eid: EntityId): boo
 
 
 /**
- * @function queryCheckComponent
- * @description Checks if a component matches a query.
- * @param {Query} query - The query to check against.
- * @param {ComponentData} c - The component data to check.
- * @returns {boolean} True if the component matches the query, false otherwise.
+ * Checks if a component matches a query.
  */
 export const queryCheckComponent = (query: Query, c: ComponentData) => {
 	const { generationId, bitflag } = c
@@ -786,10 +705,7 @@ export const queryCheckComponent = (query: Query, c: ComponentData) => {
 }
 
 /**
- * @function queryAddEntity
- * @description Adds an entity to a query.
- * @param {Query} query - The query to add the entity to.
- * @param {number} eid - The entity ID to add.
+ * Adds an entity to a query.
  */
 export const queryAddEntity = (query: Query, eid: EntityId) => {
 	// If there is a pending removal for this entity in this query, cancel it and emit add again.
@@ -810,9 +726,7 @@ export const queryAddEntity = (query: Query, eid: EntityId) => {
 }
 
 /**
- * @function queryCommitRemovals
- * @description Commits removals for a query.
- * @param {Query} query - The query to commit removals for.
+ * Commits removals for a query.
  */
 const queryCommitRemovals = (query: Query) => {
 	for (let i = 0; i < query.toRemove.dense.length; i++) {
@@ -824,9 +738,7 @@ const queryCommitRemovals = (query: Query) => {
 }
 
 /**
- * @function commitRemovals
- * @description Commits all pending removals for queries in the world.
- * @param {World} world - The world object.
+ * Commits all pending removals for queries in the world.
  */
 export const commitRemovals = (world: World) => {
 	const ctx = (world as InternalWorld)[$internal]
@@ -836,11 +748,7 @@ export const commitRemovals = (world: World) => {
 }
 
 /**
- * @function queryRemoveEntity
- * @description Removes an entity from a query.
- * @param {World} world - The world object.
- * @param {Query} query - The query to remove the entity from.
- * @param {number} eid - The entity ID to remove.
+ * Removes an entity from a query.
  */
 export const queryRemoveEntity = (world: World, query: Query, eid: EntityId) => {
 	const ctx = (world as InternalWorld)[$internal]
@@ -852,10 +760,7 @@ export const queryRemoveEntity = (world: World, query: Query, eid: EntityId) => 
 }
 
 /**
- * @function removeQuery
- * @description Removes a query from the world.
- * @param {World} world - The world object.
- * @param {QueryTerm[]} terms - The query terms of the query to remove.
+ * Removes a query from the world.
  */
 export const removeQuery = (world: World, terms: QueryTerm[]) => {
 	const ctx = (world as InternalWorld)[$internal]

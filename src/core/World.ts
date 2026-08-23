@@ -33,6 +33,9 @@ export type RelationEntry = { subject: EntityId, relation: ComponentRef }
 
 export type WorldContext = {
     entityIndex: EntityIndex
+    // Component bitmasks, one holey number[] per generation. Holey on purpose:
+    // versioned entity ids index by their full value, and sparse arrays absorb
+    // the huge indexes that versioning produces (undefined reads coerce to 0)
     entityMasks: number[][]
     entityComponents: ComponentRef[][]
     bitflag: number
@@ -133,10 +136,7 @@ const createBaseWorld = <T extends object>(context?: T, entityIndex?: EntityInde
     ) as World<T>
 
 /**
- * Creates a new world with various configurations.
- * @template T
- * @param {...Array<EntityIndex | object>} args - EntityIndex, context object, or both.
- * @returns {World<T>} The created world.
+ * Creates a new world, optionally seeded with an EntityIndex and/or a context object.
  */
 export function createWorld<T extends object = {}>(
     ...args: Array<EntityIndex | T>
@@ -157,9 +157,6 @@ export function createWorld<T extends object = {}>(
 
 /**
  * Resets a world.
- *
- * @param {World} world
- * @returns {object}
  */
 export const resetWorld = (world: World) => {
     const ctx = (world as InternalWorld)[$internal]
@@ -169,8 +166,6 @@ export const resetWorld = (world: World) => {
 
 /**
  * Deletes a world by removing its internal data.
- *
- * @param {World} world - The world to be deleted.
  */
 export const deleteWorld = (world: World) => {
     delete (world as any)[$internal];
@@ -178,18 +173,12 @@ export const deleteWorld = (world: World) => {
 
 /**
  * Returns all components registered to a world
- *
- * @param {World} world
- * @returns Array
  */
 export const getWorldComponents = (world: World) =>
     Array.from((world as InternalWorld)[$internal].componentMap.keys())
 
 /**
  * Returns all existing entities in a world
- *
- * @param {World} world
- * @returns Array
  */
 export const getAllEntities = (world: World): readonly EntityId[] => {
     const { entityIndex } = (world as InternalWorld)[$internal]

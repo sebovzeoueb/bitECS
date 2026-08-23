@@ -18,19 +18,11 @@ import { updateHierarchyDepth, invalidateHierarchyDepth } from './Hierarchy'
 
 /**
  * Represents a reference to a component.
- * @typedef {any} ComponentRef
  */
 export type ComponentRef = any
 
 /**
  * Represents the data associated with a component.
- * @interface ComponentData
- * @property {number} id - The unique identifier for the component.
- * @property {number} generationId - The generation ID of the component.
- * @property {number} bitflag - The bitflag used for component masking.
- * @property {ComponentRef} ref - Reference to the component.
- * @property {Set<Query>} queries - Set of queries associated with the component.
- * @property {Observable} setObservable - Observable for component changes.
  */
 export interface ComponentData {
 	id: number
@@ -54,9 +46,6 @@ type ComponentSetter<T = any> = { component: ComponentRef; data: T }
  * Entities with identical masks share one node, so cached transition edges are
  * computed once per archetype instead of once per entity. Trailing zero masks
  * are trimmed so the key is stable as new generations are added to the world.
- * @param {WorldContext} ctx - The world context.
- * @param {EntityId} eid - The entity ID whose masks identify the archetype.
- * @returns {ArchetypeNode} The interned archetype node.
  */
 const internArchetypeNode = (ctx: WorldContext, eid: EntityId): ArchetypeNode => {
 	let key = ''
@@ -82,13 +71,6 @@ const internArchetypeNode = (ctx: WorldContext, eid: EntityId): ArchetypeNode =>
  * Gets or computes the transition edge for adding/removing a component.
  * Follows the archetype graph: entity's current node → edge → target node.
  * Edge stores which queries to add/remove the entity from.
- * @param {World} world - The world object.
- * @param {WorldContext} ctx - The world context.
- * @param {ArchetypeNode} node - The entity's current archetype node.
- * @param {EntityId} eid - The entity ID (used for bitmask evaluation on cache miss).
- * @param {ComponentData} componentData - The component being added/removed.
- * @param {boolean} isAdd - Whether the component is being added or removed.
- * @returns {ArchetypeEdge} The cached or newly computed transition edge.
  */
 const getTransitionEdge = (
 	world: World,
@@ -121,11 +103,6 @@ const getTransitionEdge = (
 
 /**
  * Applies a cached archetype transition to an entity, updating query membership.
- * @param {World} world - The world object.
- * @param {WorldContext} ctx - The world context.
- * @param {EntityId} eid - The entity ID.
- * @param {ComponentData} componentData - The component being transitioned.
- * @param {boolean} isAdd - Whether the component is being added or removed.
  */
 const applyTransition = (world: World, ctx: WorldContext, eid: EntityId, componentData: ComponentData, isAdd: boolean) => {
 	const node = ctx.entityArchetypes[eid] || ctx.rootArchetype
@@ -140,9 +117,6 @@ const applyTransition = (world: World, ctx: WorldContext, eid: EntityId, compone
 
 /**
  * Checks if an entity is a prefab using cached component data.
- * @param {WorldContext} ctx - The world context.
- * @param {EntityId} eid - The entity ID.
- * @returns {boolean} True if the entity has the Prefab component.
  */
 const isPrefabEntity = (ctx: WorldContext, eid: EntityId): boolean => {
 	if (!ctx.prefabData) return false
@@ -221,10 +195,6 @@ const swapRemoveComponent = (ctx: WorldContext, eid: EntityId, component: Compon
 
 /**
  * Registers a component with the world.
- * @param {World} world - The world object.
- * @param {ComponentRef} component - The component to register.
- * @returns {ComponentData} The registered component data.
- * @throws {Error} If the component is null or undefined.
  */
 export const registerComponent = (world: World, component: ComponentRef) => {
 	if (!component) {
@@ -265,6 +235,7 @@ export const registerComponent = (world: World, component: ComponentRef) => {
 		ctx.bitflag *= 2
 		if (ctx.bitflag >= 2 ** 31) {
 			ctx.bitflag = 1
+			// New generation page at current capacity so existing eids are in range
 			ctx.entityMasks.push([])
 		}
 	}
@@ -274,8 +245,6 @@ export const registerComponent = (world: World, component: ComponentRef) => {
 
 /**
  * Registers multiple components with the world.
- * @param {World} world - The world object.
- * @param {ComponentRef[]} components - Array of components to register.
  */
 export const registerComponents = (world: World, components: ComponentRef[]) => {
 	for (let i = 0; i < components.length; i++) registerComponent(world, components[i])
@@ -285,10 +254,6 @@ export const registerComponents = (world: World, components: ComponentRef[]) => 
 
 /**
  * Checks if an entity has a specific component.
- * @param {World} world - The world object.
- * @param {number} eid - The entity ID.
- * @param {ComponentRef} component - The component to check for.
- * @returns {boolean} True if the entity has the component, false otherwise.
  */
 export const hasComponent = (world: World, eid: EntityId, component: ComponentRef): boolean => {
 	const ctx = (world as InternalWorld)[$internal]
@@ -342,10 +307,6 @@ export const hasComponent = (world: World, eid: EntityId, component: ComponentRe
 
 /**
  * Retrieves the data associated with a component for a specific entity.
- * @param {World} world - The world object.
- * @param {EntityId} eid - The entity ID.
- * @param {ComponentRef} component - The component to retrieve data for.
- * @returns {any} The component data, or undefined if the component is not found or the entity doesn't have the component.
  */
 export const getComponent = (world: World, eid: EntityId, component: ComponentRef): any => {
 	const ctx = (world as InternalWorld)[$internal]
@@ -359,9 +320,6 @@ export const getComponent = (world: World, eid: EntityId, component: ComponentRe
 
 /**
  * Helper function to set component data.
- * @param {ComponentRef} component - The component to set.
- * @param {any} data - The data to set for the component.
- * @returns {{ component: ComponentRef, data: any }} An object containing the component and its data.
  */
 export const set = <T extends ComponentRef>(component: T, data: any): { component: T, data: any } => ({
 	component,
@@ -370,11 +328,6 @@ export const set = <T extends ComponentRef>(component: T, data: any): { componen
 
 /**
  * Sets component data on an entity. Always calls the setter observable even if entity already has the component.
- * @param {World} world - The world object.
- * @param {EntityId} eid - The entity ID.
- * @param {ComponentRef} component - The component to set.
- * @param {any} data - The data to set for the component.
- * @throws {Error} If the entity does not exist in the world.
  */
 export const setComponent = (
 	world: World,
@@ -384,7 +337,9 @@ export const setComponent = (
 ): void => {
 	const ctx = (world as InternalWorld)[$internal]
 	const componentData = ctx.componentMap.get(component)
-	if (componentData) {
+	// Specific pairs carry no own bitflag (generationId -1); route them through
+	// addComponent, which handles existing pairs and notifies with the data
+	if (componentData && !component[$isPairComponent]) {
 		const { generationId, bitflag } = componentData
 		if ((ctx.entityMasks[generationId][eid] & bitflag) === bitflag) {
 			componentData.setObservable.notify(eid, data)
@@ -398,11 +353,7 @@ export const setComponent = (
 
 /**
  * Recursively inherits components from one entity to another.
- * @param {WorldContext} ctx - The world context.
- * @param {World} world - The world object.
- * @param {number} baseEid - The ID of the entity inheriting components.
- * @param {number} inheritedEid - The ID of the entity being inherited from.
- * @param {Set<EntityId>} visited - Set of already-visited entities to prevent circular inheritance.
+ * The visited set prevents circular inheritance from recursing forever.
  */
 const recursivelyInherit = (ctx: WorldContext, world: World, baseEid: EntityId, inheritedEid: EntityId, visited = new Set<EntityId>()): void => {
 	if (visited.has(inheritedEid)) return
@@ -436,8 +387,15 @@ const recursivelyInherit = (ctx: WorldContext, world: World, baseEid: EntityId, 
 		}
 	}
 
-	for (const parentEid of getRelationTargets(world, inheritedEid, IsA)) {
-		recursivelyInherit(ctx, world, baseEid, parentEid, visited)
+	// Iterate the Set directly: recursion only adds IsA targets to baseEid, and
+	// the shared visited set makes any additions to this set no-op revisits.
+	// Snapshot the IsA targets: user observers firing mid-inheritance can
+	// mutate the live Set, and live iteration would visit/skip those mutations
+	const isaParents = ctx.relationTargets[inheritedEid]?.get(IsA)
+	if (isaParents) {
+		for (const parentEid of [...isaParents]) {
+			recursivelyInherit(ctx, world, baseEid, parentEid, visited)
+		}
 	}
 }
 
@@ -528,12 +486,8 @@ const ensureComponentData = (world: World, ctx: WorldContext, component: Compone
 	ctx.componentMap.get(component) || registerComponent(world, component)
 
 /**
- * Adds a single component to an entity.
- * @param {World} world - The world object.
- * @param {EntityId} eid - The entity ID.
- * @param {ComponentRef | ComponentSetter} componentOrSet - Component to add or set.
- * @returns {boolean} True if component was added, false if it already existed.
- * @throws {Error} If the entity does not exist in the world.
+ * Adds a single component to an entity. Returns true if the component was
+ * added, false if it already existed.
  */
 export const addComponent = (world: World, eid: EntityId, componentOrSet: ComponentRef | ComponentSetter): boolean => {
 	if (!entityExists(world, eid)) {
@@ -562,10 +516,10 @@ export const addComponent = (world: World, eid: EntityId, componentOrSet: Compon
 			return false
 		}
 
-		// Exclusive: remove old target first
+		// Exclusive: remove old target first (peek the Set directly, no copy)
 		const relationData = relation[$relationData]
 		if (relationData.exclusiveRelation === true) {
-			const oldTarget = getRelationTargets(world, eid, relation)[0]
+			const oldTarget = ctx.relationTargets[eid]?.get(relation)?.values().next().value
 			if (oldTarget !== undefined && oldTarget !== null && oldTarget !== target) {
 				removeComponent(world, eid, relation(oldTarget))
 			}
@@ -596,6 +550,8 @@ export const addComponent = (world: World, eid: EntityId, componentOrSet: Compon
 		if (data !== undefined) pairData.setObservable.notify(eid, data)
 
 		if (relation === IsA) {
+			// Snapshot copy required: recursivelyInherit adds IsA targets to eid's
+			// own set (deep chains), which would otherwise mutate during iteration.
 			for (const inherited of getRelationTargets(world, eid, IsA)) {
 				recursivelyInherit(ctx, world, eid, inherited)
 			}
@@ -629,11 +585,7 @@ export const addComponent = (world: World, eid: EntityId, componentOrSet: Compon
 // ── Add Multiple Components ──────────────────────────────────────────
 
 /**
- * Adds multiple components to an entity.
- * @param {World} world - The world object.
- * @param {EntityId} eid - The entity ID.
- * @param {(ComponentRef | ComponentSetter)[] | ComponentRef | ComponentSetter} components - Components to add or set (array or spread args).
- * @throws {Error} If the entity does not exist in the world.
+ * Adds multiple components to an entity (array or spread args).
  */
 export function addComponents(world: World, eid: EntityId, components: (ComponentRef | ComponentSetter)[]): void
 export function addComponents(world: World, eid: EntityId, ...components: (ComponentRef | ComponentSetter)[]): void
@@ -689,17 +641,15 @@ export function addComponents(world: World, eid: EntityId, ...args: any[]): void
 
 /**
  * Internal removeComponent — skips entityExists check. Handles a single component.
- * @param {World} world - The world object.
- * @param {WorldContext} ctx - The world context.
- * @param {EntityId} eid - The entity ID.
- * @param {ComponentRef} component - The component to remove.
  */
 const removeComponentInternal = (world: World, ctx: WorldContext, eid: EntityId, component: ComponentRef) => {
 	if (component[$isPairComponent]) {
 		const relation = component[$relation]
 		const target = component[$pairTarget]
 
-		// Wildcard removal: remove all targets for this relation
+		// Wildcard removal: remove all targets for this relation.
+		// Snapshot copy required: the loop removes targets from the very Set
+		// getRelationTargets copies, so it can't iterate the live Set.
 		if (target === Wildcard && !isWildcard(relation)) {
 			const targets = getRelationTargets(world, eid, relation)
 			for (let i = 0; i < targets.length; i++) {
@@ -747,10 +697,6 @@ const removeComponentInternal = (world: World, ctx: WorldContext, eid: EntityId,
 
 /**
  * Removes one or more components from an entity.
- * @param {World} world - The world object.
- * @param {number} eid - The entity ID.
- * @param {...ComponentRef} components - Components to remove.
- * @throws {Error} If the entity does not exist in the world.
  */
 export function removeComponent(world: World, eid: EntityId, component: ComponentRef): void
 export function removeComponent(world: World, eid: EntityId, ...components: ComponentRef[]): void
@@ -799,9 +745,5 @@ export function removeComponent(world: World, eid: EntityId, ...components: Comp
 
 /**
  * Removes one or more components from an entity. This is an alias for removeComponent.
- * @param {World} world - The world object.
- * @param {EntityId} eid - The entity ID.
- * @param {...ComponentRef} components - Components to remove.
- * @throws {Error} If the entity does not exist in the world.
  */
 export const removeComponents = removeComponent

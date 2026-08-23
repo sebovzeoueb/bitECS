@@ -20,8 +20,6 @@ export const Prefab = {}
 /**
  * Creates a new prefab entity in the world. Prefabs are special entities marked with the Prefab component
  * that are excluded from normal queries and can be used as templates for creating other entities.
- * @param {World} world - The world object to create the prefab in.
- * @returns {EntityId} The entity ID of the created prefab.
  */
 export const addPrefab = (world: World): EntityId => {
 	const eid = addEntity(world)
@@ -31,9 +29,6 @@ export const addPrefab = (world: World): EntityId => {
 
 /**
  * Adds a new entity to the specified world.
- *
- * @param {World} world
- * @returns {number} eid
  */
 export function addEntity(world: World): EntityId
 export function addEntity(world: World, ...components: any[]): EntityId
@@ -57,9 +52,6 @@ export function addEntity(world: World, ...components: any[]): EntityId {
 
 /**
  * Removes an existing entity from the specified world.
- *
- * @param {World} world
- * @param {number} eid
  */
 export const removeEntity = (world: World, eid: EntityId) => {
 	const ctx = (world as InternalWorld)[$internal]
@@ -184,10 +176,7 @@ export const removeEntity = (world: World, eid: EntityId) => {
 }
 
 /**
- *  Returns an array of components that an entity possesses.
- *
- * @param {*} world
- * @param {*} eid
+ * Returns an array of components that an entity possesses.
  */
 export const getEntityComponents = (world: World, eid: EntityId): ComponentRef[] => {
 	const ctx = (world as InternalWorld)[$internal]
@@ -200,9 +189,6 @@ export const getEntityComponents = (world: World, eid: EntityId): ComponentRef[]
 
 /**
  * Checks the existence of an entity in a world
- *
- * @param {World} world
- * @param {number} eid
  */
 export const entityExists = (world: World, eid: EntityId) =>
 	isEntityIdAlive((world as InternalWorld)[$internal].entityIndex, eid)

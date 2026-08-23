@@ -353,3 +353,20 @@ describe('Component Tests', () => {
 
 
 })
+
+describe('setComponent on pair components', () => {
+	it('should set data on an existing specific pair without crashing', () => {
+		const world = createWorld()
+		const Rel = createRelation(withStore(() => ({ amount: [] as number[] })))
+		const a = addEntity(world)
+		const b = addEntity(world)
+		addComponent(world, a, Rel(b))
+
+		const received: any[] = []
+		observe(world, onSet(Rel(b)), (eid, data) => { received.push([eid, data]) })
+		setComponent(world, a, Rel(b), { amount: 5 })
+
+		expect(received).toEqual([[a, { amount: 5 }]])
+		expect(hasComponent(world, a, Rel(b))).toBe(true)
+	})
+})
