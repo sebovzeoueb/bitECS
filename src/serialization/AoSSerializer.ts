@@ -1,8 +1,10 @@
 import { 
     $u8, $i8, $u16, $i16, $u32, $i32, $f32, $f64, $arr, $ref,
     TypedArray, TypeSymbol, PrimitiveBrand, ArrayType,
-    typeSetters, typeGetters, getTypeForArray, isArrayType, getArrayElementType,
-    serializeArrayValue, deserializeArrayValue
+    typeSetters, typeGetters, rawTypeGetters, typeSizes, getTypeForArray, isArrayType, getArrayElementType,
+    serializeArrayValue, deserializeArrayValue,
+    isFloatType, getEpsilonForType,
+    createDefaultSerializationBuffer, growBuffer, ROW_HEADROOM
 } from './SoASerializer'
 
 // Internal helper type for readability only
@@ -11,20 +13,6 @@ type AnyAoSComponent =
     | TypedArray
     | ArrayType<any>
     | Record<string, any>
-
-/**
- * Checks if an array type is a float type
- */
-const isFloatType = (array: any) => {
-    const arrayType = getTypeForArray(array)
-    return arrayType === $f32 || arrayType === $f64
-}
-
-/**
- * Gets epsilon value for an array type (0 for non-floats)
- */
-const getEpsilonForType = (array: any, epsilon: number) => 
-    isFloatType(array) ? epsilon : 0
 
 /**
  * Gets or creates a shadow component array for change detection
@@ -162,7 +150,9 @@ const createAoSComponentDeserializer = (component: AnyAoSComponent) => {
         const props = Object.keys(component).filter(key => isNaN(parseInt(key)))
         const types = props.map(prop => getTypeForArray(component[prop]))
         const getters = types.map(type => typeGetters[type])
-        
+        const raws = types.map(type => rawTypeGetters[type])
+        const sizes = types.map(type => typeSizes[type])
+
         return (view: DataView, offset: number, entityId: number, entityIdMapping?: Map<number, number>) => {
             let bytesRead = 0
             const value: any = {}
@@ -178,7 +168,14 @@ const createAoSComponentDeserializer = (component: AnyAoSComponent) => {
                     }
                     bytesRead += size
                 } else {
-                    const { value: propValue, size } = getters[i](view, offset + bytesRead)
+                    const raw = raws[i]
+                    let propValue: any, size: number
+                    if (raw) {
+                        propValue = raw(view, offset + bytesRead)
+                        size = sizes[i]!
+                    } else {
+                        ({ value: propValue, size } = getters[i](view, offset + bytesRead))
+                    }
                     if (types[i] === $ref) {
                         const mapped = entityIdMapping ? entityIdMapping.get(propValue) ?? propValue : propValue
                         value[props[i]] = mapped
@@ -196,9 +193,17 @@ const createAoSComponentDeserializer = (component: AnyAoSComponent) => {
         // Direct value component
         const type = getTypeForArray(component as PrimitiveBrand | TypedArray | ArrayType<any>)
         const getter = typeGetters[type]
-        
+        const rawGetter = rawTypeGetters[type]
+        const rawSize = typeSizes[type]
+
         return (view: DataView, offset: number, entityId: number, entityIdMapping?: Map<number, number>) => {
-            const { value, size } = getter(view, offset)
+            let value: any, size: number
+            if (rawGetter) {
+                value = rawGetter(view, offset)
+                size = rawSize!
+            } else {
+                ({ value, size } = getter(view, offset))
+            }
             if (type === $ref) {
                 const mapped = entityIdMapping ? entityIdMapping.get(value) ?? value : value
                 ;(component as any)[entityId] = mapped
@@ -226,10 +231,10 @@ export type AoSSerializerOptions = {
  * @returns {Function} A function that serializes the AoS data.
  */
 export const createAoSSerializer = (components: AnyAoSComponent[], options: AoSSerializerOptions = {}) => {
-    const { 
-        diff = false, 
-        buffer = new ArrayBuffer(1024 * 1024 * 100), 
-        epsilon = 0.0001 
+    const {
+        diff = false,
+        buffer = createDefaultSerializationBuffer(),
+        epsilon = 0.0001
     } = options
 
     const view = new DataView(buffer)
@@ -243,7 +248,8 @@ export const createAoSSerializer = (components: AnyAoSComponent[], options: AoSS
         
         for (let i = 0; i < entityIds.length; i++) {
             const entityId = entityIds[i]
-            
+            growBuffer(buffer, offset + ROW_HEADROOM)
+
             if (diff) {
                 // Check if any component has changes for this entity
                 let entityHasChanges = false
@@ -313,14 +319,14 @@ export const createAoSDeserializer = (components: AnyAoSComponent[], options: Ao
 
         while (offset < packet.byteLength) {
             // Read entity ID
-            const { value: originalEntityId, size: entityIdSize } = typeGetters[$u32](view, offset)
-            offset += entityIdSize
+            const originalEntityId = view.getUint32(offset)
+            offset += 4
             const entityId = entityIdMapping ? entityIdMapping.get(originalEntityId) ?? originalEntityId : originalEntityId
 
             if (diff) {
                 // Read component mask
-                const maskGetter = components.length <= 8 ? typeGetters[$u8] : components.length <= 16 ? typeGetters[$u16] : typeGetters[$u32]
-                const { value: componentMask, size: maskSize } = maskGetter(view, offset)
+                const maskSize = components.length <= 8 ? 1 : components.length <= 16 ? 2 : 4
+                const componentMask = maskSize === 1 ? view.getUint8(offset) : maskSize === 2 ? view.getUint16(offset) : view.getUint32(offset)
                 offset += maskSize
 
                 // Read changed components

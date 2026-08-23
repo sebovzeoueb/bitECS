@@ -544,3 +544,33 @@ describe('Snapshot Serialization and Deserialization', () => {
         expect(entityExists(clientWorld, clientDamageEntity2!)).toBe(true)
     })
 });
+describe('Snapshot relation payloads larger than the growth headroom', () => {
+  it('should serialize an entity with hundreds of fat relation stores on the default buffer', () => {
+    const world = createWorld()
+    const makeStore = () => Object.fromEntries(
+      Array.from({ length: 40 }, (_, i) => [`f${i}`, f64([])])
+    )
+    const Rel = createRelation(withStore(makeStore))
+
+    const subject = addEntity(world)
+    const targets: number[] = []
+    // 250 targets: > 64KB of relation payload, within the u8 componentCount wire limit
+    for (let t = 0; t < 250; t++) {
+      const target = addEntity(world)
+      targets.push(target)
+      addComponent(world, subject, Rel(target))
+      const store = Rel(target) as any
+      for (let k = 0; k < 40; k++) store[`f${k}`][subject] = t + k * 0.5
+    }
+
+    const serialize = createSnapshotSerializer(world, [Rel])
+    const packet = serialize()
+    expect(packet.byteLength).toBeGreaterThan(64 * 1024)
+
+    const world2 = createWorld()
+    const deserialize = createSnapshotDeserializer(world2, [Rel])
+    const idMap = deserialize(packet)
+    const mappedSubject = idMap.get(subject)!
+    expect(getRelationTargets(world2, mappedSubject, Rel).length).toBe(250)
+  })
+})

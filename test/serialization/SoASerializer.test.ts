@@ -514,3 +514,46 @@ describe('SoA Serialization and Deserialization', () => {
     })
   })
 })
+
+describe('Rows larger than the growth headroom', () => {
+  it('should roundtrip strings and arrays far bigger than 64KB with the default buffer', () => {
+    const Doc = { text: str([]), samples: array($f64) }
+    const serialize = createSoASerializer([Doc])
+    const deserialize = createSoADeserializer([Doc])
+
+    const bigString = 'x'.repeat(300 * 1024)
+    const bigArray = Array.from({ length: 50_000 }, (_, i) => i * 0.5)
+    Doc.text[0] = bigString
+    ;(Doc.samples as any)[0] = bigArray
+
+    const packet = serialize([0])
+    expect(packet.byteLength).toBeGreaterThan(300 * 1024)
+
+    Doc.text[0] = ''
+    ;(Doc.samples as any)[0] = []
+    deserialize(packet)
+
+    expect(Doc.text[0]).toBe(bigString)
+    expect((Doc.samples as any)[0]).toEqual(bigArray)
+  })
+})
+
+describe('Fixed-size writes after exact-size variable writes', () => {
+  it('should serialize a fixed field following a string larger than the buffer', () => {
+    const Doc = { text: str([]), x: f32([]) }
+    const serialize = createSoASerializer([Doc])
+    const deserialize = createSoADeserializer([Doc])
+
+    const bigString = 'y'.repeat(200 * 1024)
+    Doc.text[0] = bigString
+    Doc.x[0] = 42.5
+
+    const packet = serialize([0])
+    Doc.text[0] = ''
+    Doc.x[0] = 0
+    deserialize(packet)
+
+    expect(Doc.text[0]).toBe(bigString)
+    expect(Doc.x[0]).toBe(42.5)
+  })
+})
