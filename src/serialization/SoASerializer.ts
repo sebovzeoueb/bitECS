@@ -375,6 +375,10 @@ const getShadow = (shadowMap: Map<any, any>, array: any) => {
         if (ArrayBuffer.isView(array)) {
             // TypedArray
             shadow = new (array.constructor as any)((array as any).length)
+        } else if (isArrayType(array)) {
+            // ArrayType props hold per-entity JS arrays; slots start undefined
+            // so an unset slot is not a spurious diff against a 0 fill
+            shadow = new Array(array.length)
         } else {
             // Regular array (like f32([]) arrays) - initialize with zeros
             shadow = new Array(array.length).fill(0)
@@ -385,17 +389,45 @@ const getShadow = (shadowMap: Map<any, any>, array: any) => {
 }
 
 /**
+ * Recursive element-wise compare for per-entity array values (handles nested
+ * arrays); numbers compare with epsilon, everything else with strict equality.
+ */
+const arrayValuesDiffer = (a: any, b: any, epsilon: number): boolean => {
+    if (!Array.isArray(a) || !Array.isArray(b)) {
+        return typeof a === 'number' && typeof b === 'number' && epsilon > 0
+            ? Math.abs(a - b) > epsilon
+            : a !== b
+    }
+    if (a.length !== b.length) return true
+    for (let i = 0; i < a.length; i++) {
+        if (arrayValuesDiffer(a[i], b[i], epsilon)) return true
+    }
+    return false
+}
+
+const copyArrayValue = (a: any): any => Array.isArray(a) ? a.map(copyArrayValue) : a
+
+/**
  * Checks if a value has changed and updates the shadow
  */
 const hasChanged = (shadowMap: Map<any, any>, array: any, index: number, epsilon = 0.0001) => {
     const shadow = getShadow(shadowMap, array)
     const currentValue = array[index]
     const actualEpsilon = getEpsilonForType(array, epsilon)
-    
+
+    // ArrayType props: the value is itself an array. Compare element-wise
+    // against a stored copy; a reference compare misses in-place mutation and
+    // the scalar epsilon path turns arrays into NaN (never "changed").
+    if (isArrayType(array)) {
+        const changed = arrayValuesDiffer(shadow[index], currentValue, actualEpsilon)
+        if (changed) shadow[index] = copyArrayValue(currentValue)
+        return changed
+    }
+
     const changed = actualEpsilon > 0
         ? Math.abs(shadow[index] - currentValue) > actualEpsilon
         : shadow[index] !== currentValue
-    
+
     shadow[index] = currentValue
     return changed
 }

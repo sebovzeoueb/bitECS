@@ -557,3 +557,37 @@ describe('Fixed-size writes after exact-size variable writes', () => {
     expect(Doc.x[0]).toBe(42.5)
   })
 })
+
+describe('Diff mode with array-type props', () => {
+  it('should detect first set, replacement, and in-place mutation of array values', () => {
+    const Position = { value: array(f32) }
+    const serialize = createSoASerializer([Position], { diff: true })
+    const deserialize = createSoADeserializer([Position], { diff: true })
+    const val = Position.value as any
+
+    // first set is picked up and roundtrips
+    val[0] = [1.5, 2.5]
+    const p1 = serialize([0])
+    expect(p1.byteLength).toBeGreaterThan(0)
+    val[0] = []
+    deserialize(p1)
+    expect(val[0]).toEqual([1.5, 2.5])
+
+    // reset shadow desync from the test's own overwrite
+    serialize([0])
+
+    // no change: nothing emitted
+    expect(serialize([0]).byteLength).toBe(0)
+
+    // in-place mutation is picked up
+    val[0][1] = 9.75
+    const p2 = serialize([0])
+    expect(p2.byteLength).toBeGreaterThan(0)
+    expect(serialize([0]).byteLength).toBe(0)
+
+    // replacement with a new array is picked up
+    val[0] = [3.25]
+    expect(serialize([0]).byteLength).toBeGreaterThan(0)
+    expect(serialize([0]).byteLength).toBe(0)
+  })
+})
