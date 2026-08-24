@@ -573,4 +573,33 @@ describe('Snapshot relation payloads larger than the growth headroom', () => {
     const mappedSubject = idMap.get(subject)!
     expect(getRelationTargets(world2, mappedSubject, Rel).length).toBe(250)
   })
+
+})
+
+describe('Snapshot serialization of top-level array() components', () => {
+    it('should round trip a component that IS an array type', () => {
+        // `const Position = array(f32)` rather than `{ pos: array(f32) }`.
+        // The snapshot serializer delegates component data to the SoA
+        // serializer, where an ArrayType component used to fall into the flat
+        // storage path and deserialize as NaN.
+        const Position = array(f32)
+        const store = Position as any
+        const world = createWorld()
+
+        const eid = addEntity(world)
+        addComponent(world, eid, Position)
+        store[eid] = [1, 2, 3]
+
+        const serialize = createSnapshotSerializer(world, [Position])
+        const packet = serialize()
+
+        const world2 = createWorld()
+        store.length = 0
+        const deserialize = createSnapshotDeserializer(world2, [Position])
+        const idMap = deserialize(packet)
+
+        const newEid = idMap.get(eid)!
+        expect(hasComponent(world2, newEid, Position)).toBe(true)
+        expect(store[newEid]).toEqual([1, 2, 3])
+    })
 })

@@ -3,7 +3,7 @@ import {
     TypedArray, TypeSymbol, PrimitiveBrand, ArrayType,
     typeSetters, typeGetters, rawTypeGetters, typeSizes, getTypeForArray, isArrayType, getArrayElementType,
     serializeArrayValue, deserializeArrayValue,
-    isFloatType, getEpsilonForType,
+    isFloatType, getEpsilonForType, arrayValuesDiffer, copyArrayValue,
     createDefaultSerializationBuffer, growBuffer, ROW_HEADROOM
 } from './SoASerializer'
 
@@ -36,7 +36,13 @@ const hasComponentChanged = (shadowMap: Map<any, any>, component: AnyAoSComponen
     
     if (currentValue === undefined) return false
     if (shadowValue === undefined) return true
-    
+
+    // Top-level array component: the value IS an array, so the object branch
+    // below would walk its indices as if they were property names.
+    if (Array.isArray(currentValue)) {
+        return arrayValuesDiffer(shadowValue, currentValue, getEpsilonForType(component, epsilon))
+    }
+
     if (typeof currentValue === 'object' && currentValue !== null) {
         // Object component - check each property
         const componentDef = component as any // Has property definitions
@@ -66,7 +72,10 @@ const updateShadow = (shadowMap: Map<any, any>, component: AnyAoSComponent, enti
     const shadow = getShadowComponent(shadowMap, component)
     const currentValue = component[entityId]
     
-    if (typeof currentValue === 'object' && currentValue !== null) {
+    if (Array.isArray(currentValue)) {
+        // Deep copy array (spreading it into an object would lose arrayness)
+        shadow[entityId] = copyArrayValue(currentValue)
+    } else if (typeof currentValue === 'object' && currentValue !== null) {
         // Deep copy object
         shadow[entityId] = { ...currentValue }
     } else {
@@ -80,7 +89,9 @@ const updateShadow = (shadowMap: Map<any, any>, component: AnyAoSComponent, enti
  */
 const createAoSComponentSerializer = (component: AnyAoSComponent, diff: boolean, shadowMap?: Map<any, any>, epsilon = 0.0001) => {
     // Determine if this is an object component by checking if it has property definitions
-    const isObjectComponent = typeof component === 'object' && 
+    // !isArrayType guards the ordering: an ArrayType is a JS Array whose keys
+    // are entity indices, so it must never be mistaken for a props object.
+    const isObjectComponent = typeof component === 'object' && !isArrayType(component) &&
         Object.keys(component).some(key => isNaN(parseInt(key)) && typeof component[key] === 'object')
     
     if (isObjectComponent) {
@@ -116,6 +127,24 @@ const createAoSComponentSerializer = (component: AnyAoSComponent, diff: boolean,
             
             return bytesWritten
         }
+    } else if (isArrayType(component)) {
+        // Component that IS an array type: `const Position = array(f32)`.
+        // getTypeForArray would unwrap it to its ELEMENT type and the direct
+        // branch would coerce each per-entity array through a scalar setter.
+        // Unlike the direct branch this always writes (serializeArrayValue
+        // emits a defined/undefined flag), so an unset slot cannot desync the
+        // non-diff stream, which reads every component unconditionally.
+        const elementType = getArrayElementType(component)
+
+        return (view: DataView, offset: number, entityId: number) => {
+            if (diff && shadowMap) {
+                if (!hasComponentChanged(shadowMap, component, entityId, epsilon)) {
+                    return 0
+                }
+                updateShadow(shadowMap, component, entityId)
+            }
+            return serializeArrayValue(elementType, (component as any)[entityId], view, offset)
+        }
     } else {
         // Direct value component
         const type = getTypeForArray(component as PrimitiveBrand | TypedArray | ArrayType<any>)
@@ -142,7 +171,9 @@ const createAoSComponentSerializer = (component: AnyAoSComponent, diff: boolean,
  */
 const createAoSComponentDeserializer = (component: AnyAoSComponent) => {
     // Determine if this is an object component
-    const isObjectComponent = typeof component === 'object' && 
+    // !isArrayType guards the ordering: an ArrayType is a JS Array whose keys
+    // are entity indices, so it must never be mistaken for a props object.
+    const isObjectComponent = typeof component === 'object' && !isArrayType(component) &&
         Object.keys(component).some(key => isNaN(parseInt(key)) && typeof component[key] === 'object')
     
     if (isObjectComponent) {
@@ -188,6 +219,17 @@ const createAoSComponentDeserializer = (component: AnyAoSComponent) => {
             
             component[entityId] = value
             return bytesRead
+        }
+    } else if (isArrayType(component)) {
+        // Mirror of the serializer's top-level ArrayType case.
+        const elementType = getArrayElementType(component)
+
+        return (view: DataView, offset: number, entityId: number, entityIdMapping?: Map<number, number>) => {
+            const { value, size } = deserializeArrayValue(elementType, view, offset, entityIdMapping)
+            if (Array.isArray(value)) {
+                ;(component as any)[entityId] = value
+            }
+            return size
         }
     } else {
         // Direct value component

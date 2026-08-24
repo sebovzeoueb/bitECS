@@ -392,7 +392,7 @@ const getShadow = (shadowMap: Map<any, any>, array: any) => {
  * Recursive element-wise compare for per-entity array values (handles nested
  * arrays); numbers compare with epsilon, everything else with strict equality.
  */
-const arrayValuesDiffer = (a: any, b: any, epsilon: number): boolean => {
+export const arrayValuesDiffer = (a: any, b: any, epsilon: number): boolean => {
     if (!Array.isArray(a) || !Array.isArray(b)) {
         return typeof a === 'number' && typeof b === 'number' && epsilon > 0
             ? Math.abs(a - b) > epsilon
@@ -405,7 +405,7 @@ const arrayValuesDiffer = (a: any, b: any, epsilon: number): boolean => {
     return false
 }
 
-const copyArrayValue = (a: any): any => Array.isArray(a) ? a.map(copyArrayValue) : a
+export const copyArrayValue = (a: any): any => Array.isArray(a) ? a.map(copyArrayValue) : a
 
 /**
  * Checks if a value has changed and updates the shadow
@@ -441,6 +441,28 @@ const hasChanged = (shadowMap: Map<any, any>, array: any, index: number, epsilon
  * @returns {Function} A function that serializes the component.
  */
 export const createComponentSerializer = (component: ComponentRef | PrimitiveBrand | TypedArray | ArrayType<any>, diff = false, shadowMap?: Map<any, any>, epsilon = 0.0001) => {
+    // Handle a component that IS an array type: `const Position = array(f32)`.
+    // This MUST come before the flat-array case below. An ArrayType is a real
+    // JS Array, so isTypedArrayOrBranded matches it, getTypeForArray unwraps it
+    // to its ELEMENT type, and every per-entity array gets pushed through a
+    // scalar setter -- writing NaN with no error. Each slot holds an array, so
+    // it needs the same treatment an ArrayType prop gets in the object case.
+    if (isArrayType(component)) {
+        const elementType = getArrayElementType(component)
+        return (view: DataView, offset: number, index: number, componentId: number) => {
+            let bytesWritten = 0
+            if (diff && shadowMap) {
+                if (!hasChanged(shadowMap, component, index, epsilon)) return 0 // No change
+                bytesWritten += typeSetters[$u32](view, offset + bytesWritten, index) // eid
+                bytesWritten += typeSetters[$u32](view, offset + bytesWritten, componentId) // cid
+            } else {
+                bytesWritten += typeSetters[$u32](view, offset + bytesWritten, index) // eid
+            }
+            bytesWritten += serializeArrayValue(elementType, (component as any)[index], view, offset + bytesWritten)
+            return bytesWritten
+        }
+    }
+
     // Handle direct array case
     if (isTypedArrayOrBranded(component)) {
         const type = getTypeForArray(component)
@@ -531,6 +553,32 @@ export const createComponentSerializer = (component: ComponentRef | PrimitiveBra
  * @returns {Function} A function that deserializes the component.
  */
 export const createComponentDeserializer = (component: ComponentRef | PrimitiveBrand | TypedArray | ArrayType<any>, diff = false) => {
+    // Mirror of the serializer's top-level ArrayType case, and for the same
+    // reason: without it the flat-array branch below reads one scalar and
+    // assigns it over the whole per-entity array.
+    if (isArrayType(component)) {
+        const elementType = getArrayElementType(component)
+        return (view: DataView, offset: number, entityIdMapping?: Map<number, number>) => {
+            let bytesRead = 0
+            const originalIndex = view.getUint32(offset)
+            bytesRead += 4
+            const index = entityIdMapping ? entityIdMapping.get(originalIndex) ?? originalIndex : originalIndex
+
+            if (diff) {
+                // Skip cid (component ID)
+                bytesRead += 4
+            }
+
+            const { value, size } = deserializeArrayValue(elementType, view, offset + bytesRead, entityIdMapping)
+            // An undefined slot serializes as "not defined" and yields no
+            // value; leave the existing slot alone rather than writing junk.
+            if (Array.isArray(value)) {
+                ;(component as any)[index] = value
+            }
+            return bytesRead + size
+        }
+    }
+
     // Handle direct array case
     if (isTypedArrayOrBranded(component)) {
         const type = getTypeForArray(component)

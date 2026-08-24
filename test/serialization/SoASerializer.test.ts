@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'bun:test'
 import { addEntity, createWorld } from "bitecs"
-import {$f32, $f64, $u8, $str, $ref, array, createSoADeserializer, createSoASerializer, f32, u8, str, ref} from "../../src/serialization"
+import {$f32, $f64, $u8, $str, $ref, array, createAoSDeserializer, createAoSSerializer, createSoADeserializer, createSoASerializer, f32, f64, u8, str, ref} from "../../src/serialization"
 
 describe('SoA Serialization and Deserialization', () => {
   it('should correctly serialize and deserialize component data', () => {
@@ -589,5 +589,121 @@ describe('Diff mode with array-type props', () => {
     val[0] = [3.25]
     expect(serialize([0]).byteLength).toBeGreaterThan(0)
     expect(serialize([0]).byteLength).toBe(0)
+  })
+
+})
+
+describe('top-level array() component', () => {
+  // `const Position = array(f32)` -- the component IS the array type, rather
+  // than an object with an array-typed prop. An ArrayType is a real JS Array,
+  // so every "is this a flat storage array?" check matches it and the value
+  // used to be coerced through a scalar setter into NaN.
+  it('round trips through SoA', () => {
+    const Position = array(f32)
+    const serialize = createSoASerializer([Position])
+    const deserialize = createSoADeserializer([Position])
+    const store = Position as any
+
+    store[0] = [1, 2, 3]
+    store[1] = [4.5]
+    const packet = serialize([0, 1])
+
+    store[0] = null
+    store[1] = null
+    deserialize(packet)
+
+    expect(store[0]).toEqual([1, 2, 3])
+    expect(store[1]).toEqual([4.5])
+  })
+
+  it('round trips a nested array() through SoA', () => {
+    const Matrix = array(array(f64))
+    const serialize = createSoASerializer([Matrix])
+    const deserialize = createSoADeserializer([Matrix])
+    const store = Matrix as any
+
+    store[0] = [[1, 2], [3, 4]]
+    const packet = serialize([0])
+    store[0] = null
+    deserialize(packet)
+
+    expect(store[0]).toEqual([[1, 2], [3, 4]])
+  })
+
+  it('leaves an undefined slot undefined rather than writing junk', () => {
+    const Position = array(f32)
+    const serialize = createSoASerializer([Position])
+    const deserialize = createSoADeserializer([Position])
+    const store = Position as any
+
+    store[0] = undefined
+    const packet = serialize([0])
+    deserialize(packet)
+
+    expect(store[0]).toBeUndefined()
+  })
+
+  it('diffs on change and stays silent otherwise through SoA', () => {
+    const Position = array(f32)
+    const serialize = createSoASerializer([Position], { diff: true })
+    const deserialize = createSoADeserializer([Position], { diff: true })
+    const store = Position as any
+
+    store[0] = [1, 2, 3]
+    const first = serialize([0])
+    expect(first.byteLength).toBeGreaterThan(0)
+
+    // unchanged -> nothing on the wire
+    expect(serialize([0]).byteLength).toBe(0)
+
+    // in-place mutation must still be detected
+    store[0][1] = 9
+    const second = serialize([0])
+    expect(second.byteLength).toBeGreaterThan(0)
+
+    store[0] = null
+    deserialize(first)
+    expect(store[0]).toEqual([1, 2, 3])
+    deserialize(second)
+    expect(store[0]).toEqual([1, 9, 3])
+  })
+
+  it('round trips through AoS', () => {
+    const Position = array(f32)
+    const serialize = createAoSSerializer([Position])
+    const deserialize = createAoSDeserializer([Position])
+    const store = Position as any
+
+    store[0] = [1, 2, 3]
+    store[1] = [4, 5]
+    const packet = serialize([0, 1])
+
+    store[0] = null
+    store[1] = null
+    deserialize(packet)
+
+    expect(store[0]).toEqual([1, 2, 3])
+    expect(store[1]).toEqual([4, 5])
+  })
+
+  it('diffs through AoS', () => {
+    const Position = array(f32)
+    const serialize = createAoSSerializer([Position], { diff: true })
+    const deserialize = createAoSDeserializer([Position], { diff: true })
+    const store = Position as any
+
+    store[0] = [1, 2, 3]
+    const first = serialize([0])
+    expect(first.byteLength).toBeGreaterThan(0)
+    expect(serialize([0]).byteLength).toBe(0)
+
+    store[0][2] = 7
+    const second = serialize([0])
+
+    store[0] = null
+    deserialize(first)
+    expect(store[0]).toEqual([1, 2, 3])
+    deserialize(second)
+    expect(store[0]).toEqual([1, 2, 7])
   })
 })
