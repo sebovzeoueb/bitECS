@@ -15,6 +15,11 @@ export declare const typeGetters: Record<TypeSymbol, (view: DataView, offset: nu
     value: any;
     size: number;
 }>;
+export declare const typeSizes: Partial<Record<TypeSymbol, number>>;
+export declare const rawTypeGetters: Partial<Record<TypeSymbol, (view: DataView, offset: number) => number>>;
+export declare const createDefaultSerializationBuffer: () => ArrayBuffer;
+export declare const ROW_HEADROOM: number;
+export declare const growBuffer: (buffer: ArrayBuffer, needed: number) => void;
 export declare function array(type: typeof $str | typeof str): ArrayType<string[]>;
 export declare function array(type?: TypeSymbol | TypeFunction): ArrayType<number[]>;
 export declare function array<T>(type: ArrayType<T>): ArrayType<T[]>;
@@ -29,6 +34,10 @@ export declare function deserializeArrayValue(elementType: ArrayType<any> | Type
     value: any;
     size: number;
 };
+export declare const isFloatType: (array: any) => boolean;
+export declare const getEpsilonForType: (array: any, epsilon: number) => number;
+export declare const arrayValuesDiffer: (a: any, b: any, epsilon: number) => boolean;
+export declare const copyArrayValue: (a: any) => any;
 export declare const createComponentSerializer: (component: ComponentRef | PrimitiveBrand | TypedArray | ArrayType<any>, diff?: boolean, shadowMap?: Map<any, any>, epsilon?: number) => (view: DataView, offset: number, index: number, componentId: number) => number;
 export declare const createComponentDeserializer: (component: ComponentRef | PrimitiveBrand | TypedArray | ArrayType<any>, diff?: boolean) => (view: DataView, offset: number, entityIdMapping?: Map<number, number>) => number;
 export type SoASerializerOptions = {

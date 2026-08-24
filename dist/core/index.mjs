@@ -41,8 +41,7 @@ var createEntityIndex = (options) => {
 var addEntityId = (index) => {
   if (index.aliveCount < index.dense.length) {
     const recycledId = index.dense[index.aliveCount];
-    const entityId = recycledId;
-    index.sparse[entityId] = index.aliveCount;
+    index.sparse[getId(index, recycledId)] = index.aliveCount;
     index.aliveCount++;
     return recycledId;
   }
@@ -53,15 +52,15 @@ var addEntityId = (index) => {
   return id;
 };
 var removeEntityId = (index, id) => {
-  const denseIndex = index.sparse[id];
+  const denseIndex = index.sparse[getId(index, id)];
   if (denseIndex === void 0 || denseIndex >= index.aliveCount) {
     return;
   }
   const lastIndex = index.aliveCount - 1;
   const lastId = index.dense[lastIndex];
-  index.sparse[lastId] = denseIndex;
+  index.sparse[getId(index, lastId)] = denseIndex;
   index.dense[denseIndex] = lastId;
-  index.sparse[id] = lastIndex;
+  index.sparse[getId(index, id)] = lastIndex;
   index.dense[lastIndex] = id;
   if (index.versioning) {
     const newId = incrementVersion(index, id);
@@ -78,29 +77,40 @@ var isEntityIdAlive = (index, id) => {
 // src/core/World.ts
 var $internal = Symbol.for("bitecs_internal");
 var createArchetypeNode = () => ({ edges: [] });
-var createWorldContext = (entityIndex) => ({
-  entityIndex: entityIndex || createEntityIndex(),
-  entityMasks: [[]],
-  entityComponents: [],
-  bitflag: 1,
-  componentMap: /* @__PURE__ */ new Map(),
-  componentCount: 0,
-  queries: /* @__PURE__ */ new Set(),
-  queriesHashMap: /* @__PURE__ */ new Map(),
-  notQueries: /* @__PURE__ */ new Set(),
-  dirtyQueries: /* @__PURE__ */ new Set(),
-  entityArchetypes: [],
-  rootArchetype: createArchetypeNode(),
-  prefabData: null,
-  relationTargets: [],
-  reverseIndex: [],
-  targetsByRelation: /* @__PURE__ */ new Map(),
-  pairsByTarget: /* @__PURE__ */ new Map(),
-  observerQueues: /* @__PURE__ */ new Map(),
-  hierarchyData: /* @__PURE__ */ new Map(),
-  hierarchyActiveRelations: /* @__PURE__ */ new Set(),
-  hierarchyQueryCache: /* @__PURE__ */ new Map()
-});
+var createWorldContext = (entityIndex) => {
+  const rootArchetype = createArchetypeNode();
+  return {
+    entityIndex: entityIndex || createEntityIndex(),
+    entityMasks: [[]],
+    entityComponents: [],
+    bitflag: 1,
+    componentMap: /* @__PURE__ */ new Map(),
+    componentCount: 0,
+    queries: /* @__PURE__ */ new Set(),
+    queriesHashMap: /* @__PURE__ */ new Map(),
+    notQueries: /* @__PURE__ */ new Set(),
+    queryVersion: 0,
+    dirtyQueries: /* @__PURE__ */ new Set(),
+    entityArchetypes: [],
+    rootArchetype,
+    archetypeNodeMap: /* @__PURE__ */ new Map([["", rootArchetype]]),
+    prefabData: null,
+    relationTargets: [],
+    reverseIndex: [],
+    targetsByRelation: /* @__PURE__ */ new Map(),
+    pairsByTarget: /* @__PURE__ */ new Map(),
+    queriesByTarget: /* @__PURE__ */ new Map(),
+    queriesByEntity: /* @__PURE__ */ new Map(),
+    queriesByRelation: /* @__PURE__ */ new Map(),
+    pairQueryMap: /* @__PURE__ */ new Map(),
+    queryTermCache: /* @__PURE__ */ new WeakMap(),
+    observerQueues: /* @__PURE__ */ new Map(),
+    observerQueuesByTarget: /* @__PURE__ */ new Map(),
+    hierarchyData: /* @__PURE__ */ new Map(),
+    hierarchyActiveRelations: /* @__PURE__ */ new Set(),
+    hierarchyQueryCache: /* @__PURE__ */ new Map()
+  };
+};
 var createBaseWorld = (context, entityIndex) => defineHiddenProperty(
   context || {},
   $internal,
@@ -242,11 +252,12 @@ var createObservable = () => {
       if (idx >= 0) observers.splice(idx, 1);
     };
   };
-  const notify = (entity, ...args) => {
+  const notify = function(entity, arg) {
     if (observers.length === 0) return;
+    const hasArg = arguments.length > 1;
     let result;
     for (let i = 0; i < observers.length; i++) {
-      const r = observers[i](entity, ...args);
+      const r = hasArg ? observers[i](entity, arg) : observers[i](entity);
       if (r && typeof r === "object") {
         result = result ? Object.assign(result, r) : r;
       }
@@ -406,13 +417,16 @@ function getHierarchyData(world, relation) {
   return ctx.hierarchyData.get(relation);
 }
 function populateExistingDepths(world, relation) {
+  const ctx = world[$internal];
   const entitiesWithRelation = query(world, [relation(Wildcard)]);
   for (const entity of entitiesWithRelation) {
     getEntityDepth(world, relation, entity);
   }
   const processedTargets = /* @__PURE__ */ new Set();
   for (const entity of entitiesWithRelation) {
-    for (const target of getRelationTargets(world, entity, relation)) {
+    const targets = ctx.relationTargets[entity]?.get(relation);
+    if (!targets) continue;
+    for (const target of targets) {
       if (!processedTargets.has(target)) {
         processedTargets.add(target);
         getEntityDepth(world, relation, target);
@@ -437,9 +451,10 @@ function ensureDepthTracking(world, relation) {
 function calculateEntityDepth(world, relation, entity, visited = /* @__PURE__ */ new Set()) {
   if (visited.has(entity)) return 0;
   visited.add(entity);
-  const targets = getRelationTargets(world, entity, relation);
-  if (targets.length === 0) return 0;
-  if (targets.length === 1) return getEntityDepthWithVisited(world, relation, targets[0], visited) + 1;
+  const ctx = world[$internal];
+  const targets = ctx.relationTargets[entity]?.get(relation);
+  if (!targets || targets.size === 0) return 0;
+  if (targets.size === 1) return getEntityDepthWithVisited(world, relation, targets.values().next().value, visited) + 1;
   let minDepth = Infinity;
   for (const target of targets) {
     const depth = getEntityDepthWithVisited(world, relation, target, visited);
@@ -466,14 +481,21 @@ function getEntityDepthWithVisited(world, relation, entity, visited) {
 function getEntityDepth(world, relation, entity) {
   return getEntityDepthWithVisited(world, relation, entity, /* @__PURE__ */ new Set());
 }
+function forEachChild(world, relation, parent, fn) {
+  const ctx = world[$internal];
+  const entries = ctx.reverseIndex[parent];
+  if (!entries) return;
+  for (let i = 0; i < entries.length; i++) {
+    if (entries[i].relation === relation) fn(entries[i].subject);
+  }
+}
 function markChildrenDirty(world, relation, parent, dirty, visited = createSparseSet()) {
   if (visited.has(parent)) return;
   visited.add(parent);
-  const children = query(world, [relation(parent)]);
-  for (const child of children) {
+  forEachChild(world, relation, parent, (child) => {
     dirty.add(child);
     markChildrenDirty(world, relation, child, dirty, visited);
-  }
+  });
 }
 function updateHierarchyDepth(world, relation, entity, parent, updating = /* @__PURE__ */ new Set()) {
   const ctx = world[$internal];
@@ -522,10 +544,9 @@ function invalidateSubtree(world, relation, entity, depths, visited) {
       updateDepthCache(hierarchyData, entity, INVALID_DEPTH, oldDepth);
     }
   }
-  const children = query(world, [relation(entity)]);
-  for (const child of children) {
+  forEachChild(world, relation, entity, (child) => {
     invalidateSubtree(world, relation, child, depths, visited);
-  }
+  });
 }
 function flushDirtyDepths(world, relation) {
   const ctx = world[$internal];
@@ -629,17 +650,44 @@ var hookHash = (world, hook) => {
 var getObserverQueue = (world, hook) => {
   const ctx = world[$internal];
   const hash = hookHash(world, hook);
-  let buf = ctx.observerQueues.get(hash);
-  if (!buf) {
-    buf = [];
-    ctx.observerQueues.set(hash, buf);
-    observe(world, hook, (eid) => buf.push(eid));
+  let entry = ctx.observerQueues.get(hash);
+  if (!entry) {
+    const buf = [];
+    const unsubscribe = observe(world, hook, (eid) => buf.push(eid));
     if (hook[$opType] === "add") {
       const existing = queryInternal(world, hook[$opTerms]);
       for (let i = 0; i < existing.length; i++) buf.push(existing[i]);
     }
+    entry = { buf, unsubscribe };
+    ctx.observerQueues.set(hash, entry);
+    const terms = hook[$opTerms];
+    for (let i = 0; i < terms.length; i++) {
+      const term = terms[i];
+      if (term && typeof term === "object" && term[$isPairComponent] && typeof term[$pairTarget] === "number") {
+        const target = term[$pairTarget];
+        let set2 = ctx.observerQueuesByTarget.get(target);
+        if (!set2) {
+          set2 = /* @__PURE__ */ new Set();
+          ctx.observerQueuesByTarget.set(target, set2);
+        }
+        set2.add(hash);
+      }
+    }
   }
-  return buf;
+  return entry.buf;
+};
+var dropObserverQueuesFor = (world, target) => {
+  const ctx = world[$internal];
+  const hashes = ctx.observerQueuesByTarget.get(target);
+  if (!hashes) return;
+  for (const hash of hashes) {
+    const entry = ctx.observerQueues.get(hash);
+    if (entry) {
+      entry.unsubscribe();
+      ctx.observerQueues.delete(hash);
+    }
+  }
+  ctx.observerQueuesByTarget.delete(target);
 };
 var queueDrain = (world, hook) => {
   const buf = getObserverQueue(world, hook);
@@ -683,24 +731,55 @@ var queryHash = (world, terms) => {
   return terms.map(termToString).sort().join("-");
 };
 var invalidateArchetypeTransitions = (ctx) => {
-  ctx.rootArchetype.edges = [];
-  for (let i = 0; i < ctx.entityArchetypes.length; i++) {
-    const node = ctx.entityArchetypes[i];
-    if (node) node.edges = [];
-  }
+  ctx.queryVersion++;
 };
+var indexQuery = (index, key, query2) => {
+  let set2 = index.get(key);
+  if (!set2) {
+    set2 = /* @__PURE__ */ new Set();
+    index.set(key, set2);
+  }
+  set2.add(query2);
+};
+var unindexQuery = (index, key, query2) => {
+  const set2 = index.get(key);
+  if (!set2) return;
+  set2.delete(query2);
+  if (set2.size === 0) index.delete(key);
+};
+var removeQueryFromWorld = (world, query2) => {
+  const ctx = world[$internal];
+  if (!ctx.queries.delete(query2)) return;
+  if (query2.pairComponent) ctx.pairQueryMap.delete(query2.pairComponent);
+  if (ctx.queriesHashMap.get(query2.hash) === query2) ctx.queriesHashMap.delete(query2.hash);
+  ctx.notQueries.delete(query2);
+  ctx.dirtyQueries.delete(query2);
+  for (let i = 0; i < query2.componentsData.length; i++) {
+    query2.componentsData[i].queries.delete(query2);
+  }
+  for (let i = 0; i < query2.pairFilters.length; i++) {
+    const filter = query2.pairFilters[i];
+    if ("target" in filter) unindexQuery(ctx.queriesByTarget, filter.target, query2);
+    else if ("entity" in filter) unindexQuery(ctx.queriesByEntity, filter.entity, query2);
+    else unindexQuery(ctx.queriesByRelation, filter.relation, query2);
+  }
+  invalidateArchetypeTransitions(ctx);
+};
+var isCacheablePairTerm = (term) => typeof term === "object" && term !== null && term[$isPairComponent] && !isWildcard(term[$relation]) && term[$pairTarget] !== Wildcard;
 var registerQuery = (world, terms, options = {}) => {
   const ctx = world[$internal];
   const hash = queryHash(world, terms);
   const isOp = (term) => typeof term === "object" && term !== null && $opType in term;
   const pairFilters = [];
-  const unwrapTerm = (term) => {
+  const unwrapTerm = (term, collectFilters = false) => {
     if (term[$isPairComponent]) {
       const relation = term[$relation];
       const target = term[$pairTarget];
       if (isWildcard(relation)) {
-        if (typeof target === "number") pairFilters.push({ entity: target });
-        else if (isRelation(target)) pairFilters.push({ relation: target });
+        if (collectFilters) {
+          if (typeof target === "number") pairFilters.push({ entity: target });
+          else if (isRelation(target)) pairFilters.push({ relation: target });
+        }
         return null;
       }
       if (target === Wildcard) {
@@ -708,7 +787,7 @@ var registerQuery = (world, terms, options = {}) => {
         return relation;
       }
       if (!ctx.componentMap.has(relation)) registerComponent(world, relation);
-      pairFilters.push({ relation, target });
+      if (collectFilters) pairFilters.push({ relation, target });
       return relation;
     }
     return term;
@@ -719,7 +798,7 @@ var registerQuery = (world, terms, options = {}) => {
       const opTerms = term[$opTerms];
       for (let j = 0; j < opTerms.length; j++) collect(opTerms[j]);
     } else {
-      const unwrapped = unwrapTerm(term);
+      const unwrapped = unwrapTerm(term, true);
       if (unwrapped === null) return;
       if (!ctx.componentMap.has(unwrapped)) registerComponent(world, unwrapped);
       queryComponents.push(unwrapped);
@@ -760,10 +839,8 @@ var registerQuery = (world, terms, options = {}) => {
   const orMasks = orComponents.map((c) => ctx.componentMap.get(c)).reduce(reduceBitflags, {});
   const hasMasks = allComponentsData.reduce(reduceBitflags, {});
   const hasOrTerms = orComponents.length > 0;
+  const isSingleSpecificPair = !options.buffered && terms.length === 1 && isCacheablePairTerm(terms[0]);
   const query2 = Object.assign(options.buffered ? createUint32SparseSet() : createSparseSet(), {
-    allComponents: queryComponents,
-    orComponents,
-    notComponents,
     masks,
     notMasks,
     orMasks,
@@ -774,16 +851,28 @@ var registerQuery = (world, terms, options = {}) => {
     addObservable: createObservable(),
     removeObservable: createObservable(),
     queues: {},
-    pairFilters
+    pairFilters,
+    componentsData: allComponentsData,
+    hash,
+    pairComponent: isSingleSpecificPair ? terms[0] : void 0
   });
   ctx.queries.add(query2);
   ctx.queriesHashMap.set(hash, query2);
+  if (isSingleSpecificPair) ctx.pairQueryMap.set(terms[0], query2);
   for (let i = 0; i < allComponentsData.length; i++) {
     allComponentsData[i].queries.add(query2);
   }
   if (notComponents.length) ctx.notQueries.add(query2);
+  for (let i = 0; i < pairFilters.length; i++) {
+    const filter = pairFilters[i];
+    if ("target" in filter) indexQuery(ctx.queriesByTarget, filter.target, query2);
+    else if ("entity" in filter) indexQuery(ctx.queriesByEntity, filter.entity, query2);
+    else indexQuery(ctx.queriesByRelation, filter.relation, query2);
+  }
   invalidateArchetypeTransitions(ctx);
-  if (pairFilters.length > 0 && queryComponents.length === 0) {
+  const hasTargetFilters = pairFilters.some((f) => "target" in f);
+  const hasWildcardFilters = pairFilters.some((f) => !("target" in f));
+  if (pairFilters.length > 0 && queryComponents.length === 0 && hasWildcardFilters) {
     for (const filter of pairFilters) {
       if ("entity" in filter) {
         const relTargets = ctx.relationTargets[filter.entity];
@@ -799,20 +888,46 @@ var registerQuery = (world, terms, options = {}) => {
         }
       }
     }
-  } else {
-    const entityIndex = ctx.entityIndex;
-    for (let i = 0; i < entityIndex.aliveCount; i++) {
-      const eid = entityIndex.dense[i];
-      if (hasComponent(world, eid, Prefab)) continue;
-      const match = queryCheckEntity(world, query2, eid);
-      if (match) {
-        queryAddEntity(query2, eid);
+  } else if (hasTargetFilters && !hasWildcardFilters) {
+    let bestFilter = null;
+    let bestCandidates = null;
+    for (const filter of pairFilters) {
+      if ("target" in filter && typeof filter.target === "number") {
+        const candidates = ctx.reverseIndex[filter.target];
+        if (candidates && (!bestCandidates || candidates.length < bestCandidates.length)) {
+          bestFilter = filter;
+          bestCandidates = candidates;
+        }
       }
     }
+    if (bestFilter && bestCandidates) {
+      for (let i = 0; i < bestCandidates.length; i++) {
+        const entry = bestCandidates[i];
+        if (entry.relation !== bestFilter.relation) continue;
+        if (hasComponent(world, entry.subject, Prefab)) continue;
+        if (queryCheckEntity(world, query2, entry.subject)) queryAddEntity(query2, entry.subject);
+      }
+    } else {
+      populateByScan(world, ctx, query2);
+    }
+  } else {
+    populateByScan(world, ctx, query2);
   }
   return query2;
 };
+var populateByScan = (world, ctx, query2) => {
+  const entityIndex = ctx.entityIndex;
+  for (let i = 0; i < entityIndex.aliveCount; i++) {
+    const eid = entityIndex.dense[i];
+    if (hasComponent(world, eid, Prefab)) continue;
+    if (queryCheckEntity(world, query2, eid)) queryAddEntity(query2, eid);
+  }
+};
 function queryInternal(world, terms, options = {}) {
+  const queryData = resolveQuery(world, terms, options);
+  return options.buffered ? queryData.dense : queryData.dense;
+}
+var resolveQuery = (world, terms, options = {}) => {
   const ctx = world[$internal];
   const hash = queryHash(world, terms);
   let queryData = ctx.queriesHashMap.get(hash);
@@ -821,18 +936,32 @@ function queryInternal(world, terms, options = {}) {
   } else if (options.buffered && !("buffer" in queryData.dense)) {
     queryData = registerQuery(world, terms, { buffered: true });
   }
-  return options.buffered ? queryData.dense : queryData.dense;
-}
+  return queryData;
+};
 function query(world, terms, ...modifiers) {
+  const ctx = world[$internal];
+  if (modifiers.length === 0) {
+    const cached = ctx.queryTermCache.get(terms);
+    if (cached && ctx.queries.has(cached)) {
+      commitRemovals(world);
+      return cached.dense;
+    }
+  }
+  if (terms.length === 1 && modifiers.length === 0 && isCacheablePairTerm(terms[0])) {
+    commitRemovals(world);
+    const cached = ctx.pairQueryMap.get(terms[0]) ?? registerQuery(world, terms);
+    ctx.queryTermCache.set(terms, cached);
+    return cached.dense;
+  }
   const hierarchyTerm = terms.find((term) => term && typeof term === "object" && $hierarchyType in term);
   let buffered = false, commit = true;
   const hasModifiers = modifiers.some((m) => m && typeof m === "object" && $modifierType in m);
   for (const modifier of modifiers) {
-    if (hasModifiers && modifier && typeof modifier === "object" && $modifierType in modifier) {
-      const mod = modifier;
-      if (mod[$modifierType] === "buffer") buffered = true;
-      if (mod[$modifierType] === "nested") commit = false;
-    } else if (!hasModifiers) {
+    if (hasModifiers) {
+      const type = modifier?.[$modifierType];
+      if (type === "buffer") buffered = true;
+      else if (type === "nested") commit = false;
+    } else {
       const opts = modifier;
       if (opts.buffered !== void 0) buffered = opts.buffered;
       if (opts.commit !== void 0) commit = opts.commit;
@@ -844,7 +973,9 @@ function query(world, terms, ...modifiers) {
     return depth !== void 0 ? queryHierarchyDepth(world, relation, depth, { buffered }) : queryHierarchy(world, relation, regularTerms, { buffered });
   }
   if (commit) commitRemovals(world);
-  return queryInternal(world, terms, { buffered });
+  const queryData = resolveQuery(world, terms, { buffered });
+  if (modifiers.length === 0) ctx.queryTermCache.set(terms, queryData);
+  return buffered ? queryData.dense : queryData.dense;
 }
 function queryCheckEntity(world, query2, eid) {
   const ctx = world[$internal];
@@ -929,19 +1060,33 @@ var removeQuery = (world, terms) => {
   const ctx = world[$internal];
   const hash = queryHash(world, terms);
   const query2 = ctx.queriesHashMap.get(hash);
-  if (query2) {
-    ctx.queries.delete(query2);
-    ctx.queriesHashMap.delete(hash);
-    invalidateArchetypeTransitions(ctx);
-  }
+  if (query2) removeQueryFromWorld(world, query2);
 };
 
 // src/core/Component.ts
-var createArchetypeNode2 = () => ({ edges: [] });
+var internArchetypeNode = (ctx, eid) => {
+  let key = "";
+  let pendingZeros = 0;
+  for (let g = 0; g < ctx.entityMasks.length; g++) {
+    const mask = ctx.entityMasks[g][eid] | 0;
+    if (mask === 0) {
+      pendingZeros++;
+      continue;
+    }
+    for (; pendingZeros > 0; pendingZeros--) key += "0,";
+    key += mask + ",";
+  }
+  let node = ctx.archetypeNodeMap.get(key);
+  if (!node) {
+    node = createArchetypeNode();
+    ctx.archetypeNodeMap.set(key, node);
+  }
+  return node;
+};
 var getTransitionEdge = (world, ctx, node, eid, componentData, isAdd) => {
   const action = componentData.id * 2 + (isAdd ? 1 : 0);
-  let edge = node.edges[action];
-  if (edge !== void 0) return edge;
+  const edge = node.edges[action];
+  if (edge !== void 0 && edge.version === ctx.queryVersion) return edge;
   const addTo = [];
   const removeFrom = [];
   for (const queryData of componentData.queries) {
@@ -949,9 +1094,7 @@ var getTransitionEdge = (world, ctx, node, eid, componentData, isAdd) => {
     if (queryCheckEntity(world, queryData, eid)) addTo.push(queryData);
     else removeFrom.push(queryData);
   }
-  edge = { target: createArchetypeNode2(), addTo, removeFrom };
-  node.edges[action] = edge;
-  return edge;
+  return node.edges[action] = { target: internArchetypeNode(ctx, eid), addTo, removeFrom, version: ctx.queryVersion };
 };
 var applyTransition = (world, ctx, eid, componentData, isAdd) => {
   const node = ctx.entityArchetypes[eid] || ctx.rootArchetype;
@@ -1073,6 +1216,15 @@ var hasComponent = (world, eid, component) => {
       if (!relData) return false;
       return (ctx.entityMasks[relData.generationId][eid] & relData.bitflag) === relData.bitflag;
     }
+    if (isWildcard(relation) && isRelation(target)) {
+      const rev = ctx.reverseIndex[eid];
+      if (rev) {
+        for (let i = 0; i < rev.length; i++) {
+          if (rev[i].relation === target) return true;
+        }
+      }
+      return false;
+    }
     if (isWildcard(relation)) {
       const forward = ctx.relationTargets[eid];
       if (forward) {
@@ -1103,7 +1255,7 @@ var set = (component, data) => ({
 var setComponent = (world, eid, component, data) => {
   const ctx = world[$internal];
   const componentData = ctx.componentMap.get(component);
-  if (componentData) {
+  if (componentData && !component[$isPairComponent]) {
     const { generationId, bitflag } = componentData;
     if ((ctx.entityMasks[generationId][eid] & bitflag) === bitflag) {
       componentData.setObservable.notify(eid, data);
@@ -1139,52 +1291,70 @@ var recursivelyInherit = (ctx, world, baseEid, inheritedEid, visited = /* @__PUR
       }
     }
   }
-  for (const parentEid of getRelationTargets(world, inheritedEid, IsA)) {
-    recursivelyInherit(ctx, world, baseEid, parentEid, visited);
+  const isaParents = ctx.relationTargets[inheritedEid]?.get(IsA);
+  if (isaParents) {
+    for (const parentEid of [...isaParents]) {
+      recursivelyInherit(ctx, world, baseEid, parentEid, visited);
+    }
   }
 };
 var updatePairQueries = (world, ctx, eid, relation, target, isAdd) => {
-  for (const q of ctx.queries) {
-    if (q.pairFilters.length === 0) continue;
-    for (let i = 0; i < q.pairFilters.length; i++) {
-      const filter = q.pairFilters[i];
-      if ("target" in filter) {
-        if (filter.relation === relation && filter.target === target) {
-          if (isAdd) {
-            if (queryCheckEntity(world, q, eid)) queryAddEntity(q, eid);
-          } else {
-            if (!queryCheckEntity(world, q, eid)) queryRemoveEntity(world, q, eid);
-          }
-        }
-        continue;
-      }
-      if (typeof target !== "number") continue;
-      if ("entity" in filter && filter.entity === eid) {
+  const byTarget = ctx.queriesByTarget.get(target);
+  if (byTarget) {
+    for (const q of byTarget) {
+      for (let i = 0; i < q.pairFilters.length; i++) {
+        const filter = q.pairFilters[i];
+        if (!("target" in filter) || filter.relation !== relation || filter.target !== target) continue;
         if (isAdd) {
-          queryAddEntity(q, target);
+          if (queryCheckEntity(world, q, eid)) queryAddEntity(q, eid);
         } else {
-          let stillTargeted = false;
-          const rt = ctx.relationTargets[eid];
-          if (rt) {
-            for (const [r] of rt) {
-              if (hasPairTarget(ctx, eid, r, target)) {
-                stillTargeted = true;
-                break;
-              }
-            }
-          }
-          if (!stillTargeted) queryRemoveEntity(world, q, target);
+          if (!queryCheckEntity(world, q, eid)) queryRemoveEntity(world, q, eid);
         }
-      }
-      if ("relation" in filter && filter.relation === relation) {
-        if (isAdd) {
-          queryAddEntity(q, target);
-        } else {
-          const relSet = ctx.targetsByRelation.get(relation);
-          if (!relSet || !relSet.has(target)) queryRemoveEntity(world, q, target);
-        }
+        break;
       }
     }
+  }
+  if (typeof target !== "number") return;
+  const byEntity = ctx.queriesByEntity.get(eid);
+  if (byEntity) {
+    for (const q of byEntity) {
+      if (isAdd) {
+        queryAddEntity(q, target);
+      } else {
+        let stillTargeted = false;
+        const rt = ctx.relationTargets[eid];
+        if (rt) {
+          for (const [r] of rt) {
+            if (hasPairTarget(ctx, eid, r, target)) {
+              stillTargeted = true;
+              break;
+            }
+          }
+        }
+        if (!stillTargeted) queryRemoveEntity(world, q, target);
+      }
+    }
+  }
+  const byRelation = ctx.queriesByRelation.get(relation);
+  if (byRelation) {
+    for (const q of byRelation) {
+      if (isAdd) {
+        queryAddEntity(q, target);
+      } else {
+        const relSet = ctx.targetsByRelation.get(relation);
+        if (!relSet || !relSet.has(target)) queryRemoveEntity(world, q, target);
+      }
+    }
+  }
+};
+var removeEntityPairs = (world, ctx, eid) => {
+  const comps = ctx.entityComponents[eid];
+  if (!comps) return;
+  for (let i = 0; i < comps.length; i++) {
+    const component = comps[i];
+    if (!component[$isPairComponent]) continue;
+    removePairTarget(ctx, eid, component[$relation], component[$pairTarget]);
+    updatePairQueries(world, ctx, eid, component[$relation], component[$pairTarget], false);
   }
 };
 var ensureComponentData = (world, ctx, component) => ctx.componentMap.get(component) || registerComponent(world, component);
@@ -1210,7 +1380,7 @@ var addComponent = (world, eid, componentOrSet) => {
     }
     const relationData = relation[$relationData];
     if (relationData.exclusiveRelation === true) {
-      const oldTarget = getRelationTargets(world, eid, relation)[0];
+      const oldTarget = ctx.relationTargets[eid]?.get(relation)?.values().next().value;
       if (oldTarget !== void 0 && oldTarget !== null && oldTarget !== target) {
         removeComponent(world, eid, relation(oldTarget));
       }
@@ -1281,7 +1451,7 @@ function addComponents(world, eid, ...args) {
     ctx.entityComponents[eid].push(component);
     if (data !== void 0) componentData.setObservable.notify(eid, data);
   }
-  ctx.entityArchetypes[eid] = createArchetypeNode2();
+  ctx.entityArchetypes[eid] = internArchetypeNode(ctx, eid);
   for (const q of queries) {
     if (queryCheckEntity(world, q, eid)) queryAddEntity(q, eid);
     else if (q.has(eid)) queryRemoveEntity(world, q, eid);
@@ -1351,7 +1521,7 @@ function removeComponent(world, eid, ...components) {
     for (const q of componentData.queries) queries.add(q);
     swapRemoveComponent(ctx, eid, component);
   }
-  ctx.entityArchetypes[eid] = createArchetypeNode2();
+  ctx.entityArchetypes[eid] = internArchetypeNode(ctx, eid);
   for (const q of queries) {
     if (!queryCheckEntity(world, q, eid) && q.has(eid)) queryRemoveEntity(world, q, eid);
   }
@@ -1405,6 +1575,7 @@ var removeEntity = (world, eid) => {
       }
       for (let i = 0; i < deferredOps.length; i++) deferredOps[i]();
     }
+    removeEntityPairs(world, ctx, currentEid);
     const components = ctx.entityComponents[currentEid];
     if (components) {
       const visited = /* @__PURE__ */ new Set();
@@ -1431,14 +1602,19 @@ var removeEntity = (world, eid) => {
           }
         }
       }
-      for (const q of ctx.queries) {
-        if (q.pairFilters.length > 0 && !visited.has(q)) {
-          queryRemoveEntity(world, q, currentEid);
-        }
-      }
     }
     for (const q of ctx.notQueries) {
       queryRemoveEntity(world, q, currentEid);
+    }
+    dropObserverQueuesFor(world, currentEid);
+    for (const index of [ctx.queriesByTarget, ctx.queriesByEntity]) {
+      const queries = index.get(currentEid);
+      if (!queries) continue;
+      for (const q of Array.from(queries)) {
+        if (q.addObservable.count() === 0 && q.removeObservable.count() === 0) {
+          removeQueryFromWorld(world, q);
+        }
+      }
     }
     removeEntityId(ctx.entityIndex, currentEid);
     ctx.entityComponents[currentEid] = null;
@@ -1472,7 +1648,11 @@ var entityExists = (world, eid) => isEntityIdAlive(world[$internal].entityIndex,
 
 // src/core/utils/pipe.ts
 var pipe = (...functions) => {
-  return (...args) => functions.reduce((result, fn) => [fn(...result)], args)[0];
+  return (...args) => {
+    let result = functions[0](...args);
+    for (let i = 1; i < functions.length; i++) result = functions[i](result);
+    return result;
+  };
 };
 
 // src/core/utils/soa.ts

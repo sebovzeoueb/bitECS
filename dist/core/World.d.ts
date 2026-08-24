@@ -11,6 +11,7 @@ export type ArchetypeEdge = {
     target: ArchetypeNode;
     addTo: Query[];
     removeFrom: Query[];
+    version: number;
 };
 export type RelationEntry = {
     subject: EntityId;
@@ -29,12 +30,23 @@ export type WorldContext = {
     dirtyQueries: Set<any>;
     entityArchetypes: ArchetypeNode[];
     rootArchetype: ArchetypeNode;
+    archetypeNodeMap: Map<string, ArchetypeNode>;
     prefabData: ComponentData | null;
+    queryVersion: number;
     relationTargets: (Map<ComponentRef, Set<any>> | null)[];
     reverseIndex: (RelationEntry[] | null)[];
     targetsByRelation: Map<ComponentRef, Set<EntityId>>;
     pairsByTarget: Map<EntityId, ComponentRef[]>;
-    observerQueues: Map<string, EntityId[]>;
+    queriesByTarget: Map<any, Set<Query>>;
+    queriesByEntity: Map<EntityId, Set<Query>>;
+    queriesByRelation: Map<ComponentRef, Set<Query>>;
+    pairQueryMap: Map<ComponentRef, Query>;
+    queryTermCache: WeakMap<object, Query>;
+    observerQueues: Map<string, {
+        buf: EntityId[];
+        unsubscribe: () => void;
+    }>;
+    observerQueuesByTarget: Map<EntityId, Set<string>>;
     hierarchyData: Map<ComponentRef, {
         depths: Uint32Array;
         dirty: SparseSet;
@@ -53,6 +65,7 @@ export type InternalWorld = {
 export type World<T extends object = {}> = {
     [K in keyof T]: T[K];
 };
+export declare const createArchetypeNode: () => ArchetypeNode;
 export declare function createWorld<T extends object = {}>(...args: Array<EntityIndex | T>): World<T>;
 export declare const resetWorld: (world: World) => World<{}>;
 export declare const deleteWorld: (world: World) => void;

@@ -1,7 +1,7 @@
 import { EntityId } from './Entity';
 import { Query } from './Query';
 import { Observable } from './utils/Observer';
-import { World } from './World';
+import { World, WorldContext } from './World';
 export type ComponentRef = any;
 export interface ComponentData {
     id: number;
@@ -25,6 +25,7 @@ export declare const set: <T extends ComponentRef>(component: T, data: any) => {
     data: any;
 };
 export declare const setComponent: (world: World, eid: EntityId, component: ComponentRef, data?: any) => void;
+export declare const removeEntityPairs: (world: World, ctx: WorldContext, eid: EntityId) => void;
 export declare const addComponent: (world: World, eid: EntityId, componentOrSet: ComponentRef | ComponentSetter) => boolean;
 export declare function addComponents(world: World, eid: EntityId, components: (ComponentRef | ComponentSetter)[]): void;
 export declare function addComponents(world: World, eid: EntityId, ...components: (ComponentRef | ComponentSetter)[]): void;

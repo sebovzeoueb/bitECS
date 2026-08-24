@@ -124,13 +124,11 @@ var typeSetters = {
     return 4;
   },
   [$str]: (view, offset, value) => {
-    const enc = textEncoder;
-    const bytes = enc.encode(value);
-    let written = 0;
-    written += typeSetters[$u32](view, offset + written, bytes.length);
-    new Uint8Array(view.buffer, view.byteOffset + offset + written, bytes.length).set(bytes);
-    written += bytes.length;
-    return written;
+    const bytes = textEncoder.encode(value);
+    growBuffer(view.buffer, view.byteOffset + offset + 4 + bytes.length);
+    view.setUint32(offset, bytes.length);
+    new Uint8Array(view.buffer, view.byteOffset + offset + 4, bytes.length).set(bytes);
+    return 4 + bytes.length;
   }
 };
 var typeGetters = {
@@ -150,6 +148,37 @@ var typeGetters = {
     const strValue = dec.decode(bytes);
     return { value: strValue, size: lenSize + len };
   }
+};
+var typeSizes = {
+  [$u8]: 1,
+  [$i8]: 1,
+  [$u16]: 2,
+  [$i16]: 2,
+  [$u32]: 4,
+  [$i32]: 4,
+  [$f32]: 4,
+  [$f64]: 8,
+  [$ref]: 4
+};
+var rawTypeGetters = {
+  [$u8]: (view, offset) => view.getUint8(offset),
+  [$i8]: (view, offset) => view.getInt8(offset),
+  [$u16]: (view, offset) => view.getUint16(offset),
+  [$i16]: (view, offset) => view.getInt16(offset),
+  [$u32]: (view, offset) => view.getUint32(offset),
+  [$i32]: (view, offset) => view.getInt32(offset),
+  [$f32]: (view, offset) => view.getFloat32(offset),
+  [$f64]: (view, offset) => view.getFloat64(offset),
+  [$ref]: (view, offset) => view.getUint32(offset)
+};
+var createDefaultSerializationBuffer = () => {
+  const buffer = new ArrayBuffer(64 * 1024, { maxByteLength: 100 * 1024 * 1024 });
+  return buffer.resizable ? buffer : new ArrayBuffer(100 * 1024 * 1024);
+};
+var ROW_HEADROOM = 64 * 1024;
+var growBuffer = (buffer, needed) => {
+  if (needed <= buffer.byteLength || !buffer.resizable) return;
+  buffer.resize(Math.min(buffer.maxByteLength, Math.max(buffer.byteLength * 2, needed + ROW_HEADROOM)));
 };
 function resolveTypeToSymbol(type) {
   if (typeof type === "symbol") {
@@ -173,7 +202,7 @@ function array(type = f64) {
   return arr;
 }
 function isTypedArrayOrBranded(arr) {
-  return arr && (ArrayBuffer.isView(arr) || Array.isArray(arr) && typeof arr === "object");
+  return arr && (ArrayBuffer.isView(arr) || Array.isArray(arr));
 }
 function getTypeForArray(arr) {
   if (isArrayType(arr)) {
@@ -199,43 +228,60 @@ function getArrayElementType(arrayType) {
 }
 function serializeArrayValue(elementType, value, view, offset) {
   let bytesWritten = 0;
+  growBuffer(view.buffer, view.byteOffset + offset + 5);
   const isArrayDefined = Array.isArray(value) ? 1 : 0;
   bytesWritten += typeSetters[$u8](view, offset, isArrayDefined);
   if (!isArrayDefined) {
     return bytesWritten;
   }
   bytesWritten += typeSetters[$u32](view, offset + bytesWritten, value.length);
+  const nested = isArrayType(elementType);
+  const innerType = nested ? getArrayElementType(elementType) : void 0;
+  const symbol = nested ? void 0 : resolveTypeToSymbol(elementType);
+  const setter = symbol ? typeSetters[symbol] : void 0;
+  const elemSize = symbol ? typeSizes[symbol] : void 0;
+  if (elemSize) growBuffer(view.buffer, view.byteOffset + offset + bytesWritten + value.length * elemSize);
   for (let i = 0; i < value.length; i++) {
     const element = value[i];
-    if (isArrayType(elementType)) {
-      bytesWritten += serializeArrayValue(getArrayElementType(elementType), element, view, offset + bytesWritten);
+    if (nested) {
+      bytesWritten += serializeArrayValue(innerType, element, view, offset + bytesWritten);
     } else {
-      const symbol = resolveTypeToSymbol(elementType);
-      bytesWritten += typeSetters[symbol](view, offset + bytesWritten, element);
+      bytesWritten += setter(view, offset + bytesWritten, element);
     }
   }
   return bytesWritten;
 }
 function deserializeArrayValue(elementType, view, offset, entityIdMapping) {
   let bytesRead = 0;
-  const isArrayResult = typeGetters[$u8](view, offset + bytesRead);
-  bytesRead += isArrayResult.size;
-  if (!isArrayResult.value) {
+  const isArrayDefined = view.getUint8(offset + bytesRead);
+  bytesRead += 1;
+  if (!isArrayDefined) {
     return { size: bytesRead };
   }
-  const arrayLengthResult = typeGetters[$u32](view, offset + bytesRead);
-  bytesRead += arrayLengthResult.size;
-  const arr = new Array(arrayLengthResult.value);
+  const arrayLength = view.getUint32(offset + bytesRead);
+  bytesRead += 4;
+  const nested = isArrayType(elementType);
+  const innerType = nested ? getArrayElementType(elementType) : void 0;
+  const symbol = nested ? void 0 : resolveTypeToSymbol(elementType);
+  const rawGetter = symbol ? rawTypeGetters[symbol] : void 0;
+  const rawSize = symbol ? typeSizes[symbol] : void 0;
+  const getter = symbol ? typeGetters[symbol] : void 0;
+  const arr = new Array(arrayLength);
   for (let i = 0; i < arr.length; i++) {
-    if (isArrayType(elementType)) {
-      const { value, size } = deserializeArrayValue(getArrayElementType(elementType), view, offset + bytesRead, entityIdMapping);
+    if (nested) {
+      const { value, size } = deserializeArrayValue(innerType, view, offset + bytesRead, entityIdMapping);
       bytesRead += size;
       if (Array.isArray(value)) {
         arr[i] = value;
       }
     } else {
-      const symbol = resolveTypeToSymbol(elementType);
-      const { value, size } = typeGetters[symbol](view, offset + bytesRead);
+      let value, size;
+      if (rawGetter) {
+        value = rawGetter(view, offset + bytesRead);
+        size = rawSize;
+      } else {
+        ({ value, size } = getter(view, offset + bytesRead));
+      }
       bytesRead += size;
       if (symbol === $ref) {
         const mapped = entityIdMapping ? entityIdMapping.get(value) ?? value : value;
@@ -257,6 +303,8 @@ var getShadow = (shadowMap, array2) => {
   if (!shadow) {
     if (ArrayBuffer.isView(array2)) {
       shadow = new array2.constructor(array2.length);
+    } else if (isArrayType(array2)) {
+      shadow = new Array(array2.length);
     } else {
       shadow = new Array(array2.length).fill(0);
     }
@@ -264,15 +312,46 @@ var getShadow = (shadowMap, array2) => {
   }
   return shadow;
 };
+var arrayValuesDiffer = (a, b, epsilon) => {
+  if (!Array.isArray(a) || !Array.isArray(b)) {
+    return typeof a === "number" && typeof b === "number" && epsilon > 0 ? Math.abs(a - b) > epsilon : a !== b;
+  }
+  if (a.length !== b.length) return true;
+  for (let i = 0; i < a.length; i++) {
+    if (arrayValuesDiffer(a[i], b[i], epsilon)) return true;
+  }
+  return false;
+};
+var copyArrayValue = (a) => Array.isArray(a) ? a.map(copyArrayValue) : a;
 var hasChanged = (shadowMap, array2, index, epsilon = 1e-4) => {
   const shadow = getShadow(shadowMap, array2);
   const currentValue = array2[index];
   const actualEpsilon = getEpsilonForType(array2, epsilon);
+  if (isArrayType(array2)) {
+    const changed2 = arrayValuesDiffer(shadow[index], currentValue, actualEpsilon);
+    if (changed2) shadow[index] = copyArrayValue(currentValue);
+    return changed2;
+  }
   const changed = actualEpsilon > 0 ? Math.abs(shadow[index] - currentValue) > actualEpsilon : shadow[index] !== currentValue;
   shadow[index] = currentValue;
   return changed;
 };
 var createComponentSerializer = (component, diff = false, shadowMap, epsilon = 1e-4) => {
+  if (isArrayType(component)) {
+    const elementType = getArrayElementType(component);
+    return (view, offset, index, componentId) => {
+      let bytesWritten = 0;
+      if (diff && shadowMap) {
+        if (!hasChanged(shadowMap, component, index, epsilon)) return 0;
+        bytesWritten += typeSetters[$u32](view, offset + bytesWritten, index);
+        bytesWritten += typeSetters[$u32](view, offset + bytesWritten, componentId);
+      } else {
+        bytesWritten += typeSetters[$u32](view, offset + bytesWritten, index);
+      }
+      bytesWritten += serializeArrayValue(elementType, component[index], view, offset + bytesWritten);
+      return bytesWritten;
+    };
+  }
   if (isTypedArrayOrBranded(component)) {
     const type = getTypeForArray(component);
     const setter = typeSetters[type];
@@ -345,19 +424,44 @@ var createComponentSerializer = (component, diff = false, shadowMap, epsilon = 1
   };
 };
 var createComponentDeserializer = (component, diff = false) => {
+  if (isArrayType(component)) {
+    const elementType = getArrayElementType(component);
+    return (view, offset, entityIdMapping) => {
+      let bytesRead = 0;
+      const originalIndex = view.getUint32(offset);
+      bytesRead += 4;
+      const index = entityIdMapping ? entityIdMapping.get(originalIndex) ?? originalIndex : originalIndex;
+      if (diff) {
+        bytesRead += 4;
+      }
+      const { value, size } = deserializeArrayValue(elementType, view, offset + bytesRead, entityIdMapping);
+      if (Array.isArray(value)) {
+        ;
+        component[index] = value;
+      }
+      return bytesRead + size;
+    };
+  }
   if (isTypedArrayOrBranded(component)) {
     const type = getTypeForArray(component);
     const getter = typeGetters[type];
+    const rawGetter = rawTypeGetters[type];
+    const rawSize = typeSizes[type];
     return (view, offset, entityIdMapping) => {
       let bytesRead = 0;
-      const { value: originalIndex, size: indexSize } = typeGetters[$u32](view, offset);
-      bytesRead += indexSize;
+      const originalIndex = view.getUint32(offset);
+      bytesRead += 4;
       const index = entityIdMapping ? entityIdMapping.get(originalIndex) ?? originalIndex : originalIndex;
       if (diff) {
-        const { size: cidSize } = typeGetters[$u32](view, offset + bytesRead);
-        bytesRead += cidSize;
+        bytesRead += 4;
       }
-      const { value, size } = getter(view, offset + bytesRead);
+      let value, size;
+      if (rawGetter) {
+        value = rawGetter(view, offset + bytesRead);
+        size = rawSize;
+      } else {
+        ({ value, size } = getter(view, offset + bytesRead));
+      }
       if (type === $ref) {
         const mapped = entityIdMapping ? entityIdMapping.get(value) ?? value : value;
         component[index] = mapped;
@@ -376,60 +480,50 @@ var createComponentDeserializer = (component, diff = false) => {
     }
     return getTypeForArray(arr);
   });
-  const getters = types.map((type) => typeGetters[type] || (() => {
-    throw new Error(`Unsupported or unannotated type`);
-  }));
+  const propReaders = props.map((prop, i) => {
+    const type = types[i];
+    const rawGetter = rawTypeGetters[type];
+    const rawSize = typeSizes[type];
+    const getter = typeGetters[type] || (() => {
+      throw new Error(`Unsupported or unannotated type`);
+    });
+    return (view, offset, index, entityIdMapping) => {
+      const componentProperty = component[prop];
+      if (isArrayType(componentProperty)) {
+        const { value: value2, size: size2 } = deserializeArrayValue(getArrayElementType(componentProperty), view, offset, entityIdMapping);
+        if (Array.isArray(value2)) {
+          componentProperty[index] = value2;
+        }
+        return size2;
+      }
+      if (rawGetter) {
+        const value2 = rawGetter(view, offset);
+        componentProperty[index] = type === $ref ? entityIdMapping ? entityIdMapping.get(value2) ?? value2 : value2 : value2;
+        return rawSize;
+      }
+      const { value, size } = getter(view, offset);
+      componentProperty[index] = value;
+      return size;
+    };
+  });
+  const maskSize = props.length <= 8 ? 1 : props.length <= 16 ? 2 : 4;
   return (view, offset, entityIdMapping) => {
     let bytesRead = 0;
-    const { value: originalIndex, size: indexSize } = typeGetters[$u32](view, offset + bytesRead);
-    bytesRead += indexSize;
+    const originalIndex = view.getUint32(offset + bytesRead);
+    bytesRead += 4;
     const index = entityIdMapping ? entityIdMapping.get(originalIndex) ?? originalIndex : originalIndex;
     if (diff) {
-      const { size: cidSize } = typeGetters[$u32](view, offset + bytesRead);
-      bytesRead += cidSize;
-      const maskGetter = props.length <= 8 ? typeGetters[$u8] : props.length <= 16 ? typeGetters[$u16] : typeGetters[$u32];
-      const { value: changeMask, size: maskSize } = maskGetter(view, offset + bytesRead);
+      bytesRead += 4;
+      const changeMask = maskSize === 1 ? view.getUint8(offset + bytesRead) : maskSize === 2 ? view.getUint16(offset + bytesRead) : view.getUint32(offset + bytesRead);
       bytesRead += maskSize;
-      for (let i = 0; i < props.length; i++) {
+      for (let i = 0; i < propReaders.length; i++) {
         if (changeMask & 1 << i) {
-          const componentProperty = component[props[i]];
-          if (isArrayType(componentProperty)) {
-            const { value, size } = deserializeArrayValue(getArrayElementType(componentProperty), view, offset + bytesRead, entityIdMapping);
-            if (Array.isArray(value)) {
-              componentProperty[index] = value;
-            }
-            bytesRead += size;
-          } else {
-            const { value, size } = getters[i](view, offset + bytesRead);
-            if (types[i] === $ref) {
-              const mapped = entityIdMapping ? entityIdMapping.get(value) ?? value : value;
-              component[props[i]][index] = mapped;
-            } else {
-              component[props[i]][index] = value;
-            }
-            bytesRead += size;
-          }
+          bytesRead += propReaders[i](view, offset + bytesRead, index, entityIdMapping);
         }
       }
     } else {
-      for (let i = 0; i < props.length; i++) {
-        const componentProperty = component[props[i]];
-        if (isArrayType(componentProperty)) {
-          const { value, size } = deserializeArrayValue(getArrayElementType(componentProperty), view, offset + bytesRead, entityIdMapping);
-          if (Array.isArray(value)) {
-            componentProperty[index] = value;
-          }
-          bytesRead += size;
-        } else {
-          const { value, size } = getters[i](view, offset + bytesRead);
-          if (types[i] === $ref) {
-            const mapped = entityIdMapping ? entityIdMapping.get(value) ?? value : value;
-            component[props[i]][index] = mapped;
-          } else {
-            component[props[i]][index] = value;
-          }
-          bytesRead += size;
-        }
+      for (let i = 0; i < propReaders.length; i++) {
+        bytesRead += propReaders[i](view, offset + bytesRead, index, entityIdMapping);
       }
     }
     return bytesRead;
@@ -438,7 +532,7 @@ var createComponentDeserializer = (component, diff = false) => {
 var createSoASerializer = (components, options = {}) => {
   const {
     diff = false,
-    buffer = new ArrayBuffer(1024 * 1024 * 100),
+    buffer = createDefaultSerializationBuffer(),
     epsilon = 1e-4
   } = options;
   const view = new DataView(buffer);
@@ -449,6 +543,7 @@ var createSoASerializer = (components, options = {}) => {
     for (let i = 0; i < indices.length; i++) {
       const index = indices[i];
       for (let j = 0; j < componentSerializers.length; j++) {
+        growBuffer(buffer, offset + ROW_HEADROOM);
         offset += componentSerializers[j](view, offset, index, j);
       }
     }
@@ -463,8 +558,7 @@ var createSoADeserializer = (components, options = {}) => {
     let offset = 0;
     while (offset < packet.byteLength) {
       if (diff) {
-        const { value: originalEid, size: eidSize } = typeGetters[$u32](view, offset);
-        const { value: componentId, size: cidSize } = typeGetters[$u32](view, offset + eidSize);
+        const componentId = view.getUint32(offset + 4);
         offset += componentDeserializers[componentId](view, offset, entityIdMapping);
       } else {
         for (let i = 0; i < componentDeserializers.length; i++) {
@@ -476,11 +570,6 @@ var createSoADeserializer = (components, options = {}) => {
 };
 
 // src/serialization/AoSSerializer.ts
-var isFloatType2 = (array2) => {
-  const arrayType = getTypeForArray(array2);
-  return arrayType === $f32 || arrayType === $f64;
-};
-var getEpsilonForType2 = (array2, epsilon) => isFloatType2(array2) ? epsilon : 0;
 var getShadowComponent = (shadowMap, component) => {
   let shadow = shadowMap.get(component);
   if (!shadow) {
@@ -495,32 +584,37 @@ var hasComponentChanged = (shadowMap, component, entityId, epsilon) => {
   const shadowValue = shadow[entityId];
   if (currentValue === void 0) return false;
   if (shadowValue === void 0) return true;
+  if (Array.isArray(currentValue)) {
+    return arrayValuesDiffer(shadowValue, currentValue, getEpsilonForType(component, epsilon));
+  }
   if (typeof currentValue === "object" && currentValue !== null) {
     const componentDef = component;
     for (const prop in currentValue) {
       if (componentDef[prop]) {
-        const propEpsilon = getEpsilonForType2(componentDef[prop], epsilon);
+        const propEpsilon = getEpsilonForType(componentDef[prop], epsilon);
         const changed = propEpsilon > 0 ? Math.abs(shadowValue[prop] - currentValue[prop]) > propEpsilon : shadowValue[prop] !== currentValue[prop];
         if (changed) return true;
       }
     }
     return false;
   } else {
-    const valueEpsilon = getEpsilonForType2(component, epsilon);
+    const valueEpsilon = getEpsilonForType(component, epsilon);
     return valueEpsilon > 0 ? Math.abs(shadowValue - currentValue) > valueEpsilon : shadowValue !== currentValue;
   }
 };
 var updateShadow = (shadowMap, component, entityId) => {
   const shadow = getShadowComponent(shadowMap, component);
   const currentValue = component[entityId];
-  if (typeof currentValue === "object" && currentValue !== null) {
+  if (Array.isArray(currentValue)) {
+    shadow[entityId] = copyArrayValue(currentValue);
+  } else if (typeof currentValue === "object" && currentValue !== null) {
     shadow[entityId] = { ...currentValue };
   } else {
     shadow[entityId] = currentValue;
   }
 };
 var createAoSComponentSerializer = (component, diff, shadowMap, epsilon = 1e-4) => {
-  const isObjectComponent = typeof component === "object" && Object.keys(component).some((key) => isNaN(parseInt(key)) && typeof component[key] === "object");
+  const isObjectComponent = typeof component === "object" && !isArrayType(component) && Object.keys(component).some((key) => isNaN(parseInt(key)) && typeof component[key] === "object");
   if (isObjectComponent) {
     const props = Object.keys(component).filter((key) => isNaN(parseInt(key)));
     const types = props.map((prop) => getTypeForArray(component[prop]));
@@ -546,6 +640,17 @@ var createAoSComponentSerializer = (component, diff, shadowMap, epsilon = 1e-4) 
       }
       return bytesWritten;
     };
+  } else if (isArrayType(component)) {
+    const elementType = getArrayElementType(component);
+    return (view, offset, entityId) => {
+      if (diff && shadowMap) {
+        if (!hasComponentChanged(shadowMap, component, entityId, epsilon)) {
+          return 0;
+        }
+        updateShadow(shadowMap, component, entityId);
+      }
+      return serializeArrayValue(elementType, component[entityId], view, offset);
+    };
   } else {
     const type = getTypeForArray(component);
     const setter = typeSetters[type];
@@ -563,11 +668,13 @@ var createAoSComponentSerializer = (component, diff, shadowMap, epsilon = 1e-4) 
   }
 };
 var createAoSComponentDeserializer = (component) => {
-  const isObjectComponent = typeof component === "object" && Object.keys(component).some((key) => isNaN(parseInt(key)) && typeof component[key] === "object");
+  const isObjectComponent = typeof component === "object" && !isArrayType(component) && Object.keys(component).some((key) => isNaN(parseInt(key)) && typeof component[key] === "object");
   if (isObjectComponent) {
     const props = Object.keys(component).filter((key) => isNaN(parseInt(key)));
     const types = props.map((prop) => getTypeForArray(component[prop]));
     const getters = types.map((type) => typeGetters[type]);
+    const raws = types.map((type) => rawTypeGetters[type]);
+    const sizes = types.map((type) => typeSizes[type]);
     return (view, offset, entityId, entityIdMapping) => {
       let bytesRead = 0;
       const value = {};
@@ -580,7 +687,14 @@ var createAoSComponentDeserializer = (component) => {
           }
           bytesRead += size;
         } else {
-          const { value: propValue, size } = getters[i](view, offset + bytesRead);
+          const raw = raws[i];
+          let propValue, size;
+          if (raw) {
+            propValue = raw(view, offset + bytesRead);
+            size = sizes[i];
+          } else {
+            ({ value: propValue, size } = getters[i](view, offset + bytesRead));
+          }
           if (types[i] === $ref) {
             const mapped = entityIdMapping ? entityIdMapping.get(propValue) ?? propValue : propValue;
             value[props[i]] = mapped;
@@ -593,11 +707,29 @@ var createAoSComponentDeserializer = (component) => {
       component[entityId] = value;
       return bytesRead;
     };
+  } else if (isArrayType(component)) {
+    const elementType = getArrayElementType(component);
+    return (view, offset, entityId, entityIdMapping) => {
+      const { value, size } = deserializeArrayValue(elementType, view, offset, entityIdMapping);
+      if (Array.isArray(value)) {
+        ;
+        component[entityId] = value;
+      }
+      return size;
+    };
   } else {
     const type = getTypeForArray(component);
     const getter = typeGetters[type];
+    const rawGetter = rawTypeGetters[type];
+    const rawSize = typeSizes[type];
     return (view, offset, entityId, entityIdMapping) => {
-      const { value, size } = getter(view, offset);
+      let value, size;
+      if (rawGetter) {
+        value = rawGetter(view, offset);
+        size = rawSize;
+      } else {
+        ({ value, size } = getter(view, offset));
+      }
       if (type === $ref) {
         const mapped = entityIdMapping ? entityIdMapping.get(value) ?? value : value;
         component[entityId] = mapped;
@@ -612,7 +744,7 @@ var createAoSComponentDeserializer = (component) => {
 var createAoSSerializer = (components, options = {}) => {
   const {
     diff = false,
-    buffer = new ArrayBuffer(1024 * 1024 * 100),
+    buffer = createDefaultSerializationBuffer(),
     epsilon = 1e-4
   } = options;
   const view = new DataView(buffer);
@@ -624,6 +756,7 @@ var createAoSSerializer = (components, options = {}) => {
     let offset = 0;
     for (let i = 0; i < entityIds.length; i++) {
       const entityId = entityIds[i];
+      growBuffer(buffer, offset + ROW_HEADROOM);
       if (diff) {
         let entityHasChanges = false;
         for (let j = 0; j < components.length; j++) {
@@ -663,12 +796,12 @@ var createAoSDeserializer = (components, options = {}) => {
     const view = new DataView(packet);
     let offset = 0;
     while (offset < packet.byteLength) {
-      const { value: originalEntityId, size: entityIdSize } = typeGetters[$u32](view, offset);
-      offset += entityIdSize;
+      const originalEntityId = view.getUint32(offset);
+      offset += 4;
       const entityId = entityIdMapping ? entityIdMapping.get(originalEntityId) ?? originalEntityId : originalEntityId;
       if (diff) {
-        const maskGetter = components.length <= 8 ? typeGetters[$u8] : components.length <= 16 ? typeGetters[$u16] : typeGetters[$u32];
-        const { value: componentMask, size: maskSize } = maskGetter(view, offset);
+        const maskSize = components.length <= 8 ? 1 : components.length <= 16 ? 2 : 4;
+        const componentMask = maskSize === 1 ? view.getUint8(offset) : maskSize === 2 ? view.getUint16(offset) : view.getUint32(offset);
         offset += maskSize;
         for (let i = 0; i < components.length; i++) {
           if (componentMask & 1 << i) {
@@ -686,11 +819,14 @@ var createAoSDeserializer = (components, options = {}) => {
 
 // src/serialization/SnapshotSerializer.ts
 var import_bitecs = require("bitecs");
+
+// src/serialization/relationData.ts
 function serializeRelationData(data, eid, dataView, offset) {
   if (!data) return offset;
   if (Array.isArray(data)) {
     const value = data[eid];
     if (value !== void 0) {
+      growBuffer(dataView.buffer, dataView.byteOffset + offset + 8);
       if ($ref in data) {
         dataView.setUint32(offset, value);
         return offset + 4;
@@ -703,6 +839,7 @@ function serializeRelationData(data, eid, dataView, offset) {
   }
   if (typeof data === "object") {
     const keys = Object.keys(data).sort();
+    growBuffer(dataView.buffer, dataView.byteOffset + offset + keys.length * 8);
     for (const key of keys) {
       const arr = data[key];
       const value = arr[eid];
@@ -788,8 +925,14 @@ function deserializeRelationData(data, eid, dataView, offset, entityIdMapping) {
   }
   return offset;
 }
-var createSnapshotSerializer = (world, components, buffer = new ArrayBuffer(1024 * 1024 * 100)) => {
+
+// src/serialization/SnapshotSerializer.ts
+var createSnapshotSerializer = (world, components, buffer = createDefaultSerializationBuffer()) => {
   const dataView = new DataView(buffer);
+  const soaCapacity = buffer.maxByteLength ?? buffer.byteLength;
+  const soaSerializer = createSoASerializer(components, {
+    buffer: new ArrayBuffer(Math.min(64 * 1024, soaCapacity), { maxByteLength: soaCapacity })
+  });
   let offset = 0;
   const serializeEntityComponentRelationships = (entities) => {
     const entityCount = entities.length;
@@ -798,6 +941,7 @@ var createSnapshotSerializer = (world, components, buffer = new ArrayBuffer(1024
     for (let i = 0; i < entityCount; i++) {
       const entityId = entities[i];
       let componentCount = 0;
+      growBuffer(buffer, offset + ROW_HEADROOM);
       dataView.setUint32(offset, entityId);
       offset += 4;
       const componentCountOffset = offset;
@@ -807,6 +951,7 @@ var createSnapshotSerializer = (world, components, buffer = new ArrayBuffer(1024
         if ((0, import_bitecs.isRelation)(component)) {
           const targets = (0, import_bitecs.getRelationTargets)(world, entityId, component);
           for (const target of targets) {
+            growBuffer(buffer, offset + ROW_HEADROOM);
             dataView.setUint8(offset, j);
             offset += 1;
             dataView.setUint32(offset, target);
@@ -825,8 +970,8 @@ var createSnapshotSerializer = (world, components, buffer = new ArrayBuffer(1024
     }
   };
   const serializeComponentData = (entities) => {
-    const soaSerializer = createSoASerializer(components, { buffer: buffer.slice(offset) });
     const componentData = soaSerializer(entities);
+    growBuffer(buffer, offset + componentData.byteLength);
     new Uint8Array(buffer).set(new Uint8Array(componentData), offset);
     offset += componentData.byteLength;
   };
@@ -884,110 +1029,8 @@ var createSnapshotDeserializer = (world, components, idMap) => {
 
 // src/serialization/ObserverSerializer.ts
 var import_bitecs2 = require("bitecs");
-function serializeRelationData2(data, eid, dataView, offset) {
-  if (!data) return offset;
-  if (Array.isArray(data)) {
-    const value = data[eid];
-    if (value !== void 0) {
-      if ($ref in data) {
-        dataView.setUint32(offset, value);
-        return offset + 4;
-      } else {
-        dataView.setFloat64(offset, value);
-        return offset + 8;
-      }
-    }
-    return offset;
-  }
-  if (typeof data === "object") {
-    const keys = Object.keys(data).sort();
-    for (const key of keys) {
-      const arr = data[key];
-      const value = arr[eid];
-      if (value !== void 0) {
-        if (arr instanceof Int8Array || $i8 in arr) {
-          dataView.setInt8(offset, value);
-          offset += 1;
-        } else if (arr instanceof Uint8Array || $u8 in arr) {
-          dataView.setUint8(offset, value);
-          offset += 1;
-        } else if (arr instanceof Int16Array || $i16 in arr) {
-          dataView.setInt16(offset, value);
-          offset += 2;
-        } else if (arr instanceof Uint16Array || $u16 in arr) {
-          dataView.setUint16(offset, value);
-          offset += 2;
-        } else if (arr instanceof Int32Array || $i32 in arr) {
-          dataView.setInt32(offset, value);
-          offset += 4;
-        } else if (arr instanceof Uint32Array || $u32 in arr || $ref in arr) {
-          dataView.setUint32(offset, value);
-          offset += 4;
-        } else if (arr instanceof Float32Array || $f32 in arr) {
-          dataView.setFloat32(offset, value);
-          offset += 4;
-        } else {
-          dataView.setFloat64(offset, value);
-          offset += 8;
-        }
-      }
-    }
-  }
-  return offset;
-}
-function deserializeRelationData2(data, eid, dataView, offset, entityIdMapping) {
-  if (!data) return offset;
-  if (Array.isArray(data)) {
-    if ($ref in data) {
-      const value = dataView.getUint32(offset);
-      const mapped = entityIdMapping ? entityIdMapping.get(value) ?? value : value;
-      data[eid] = mapped;
-      return offset + 4;
-    }
-    data[eid] = dataView.getFloat64(offset);
-    return offset + 8;
-  }
-  if (typeof data === "object") {
-    const keys = Object.keys(data).sort();
-    for (const key of keys) {
-      const arr = data[key];
-      if (arr instanceof Int8Array || $i8 in arr) {
-        arr[eid] = dataView.getInt8(offset);
-        offset += 1;
-      } else if (arr instanceof Uint8Array || $u8 in arr) {
-        arr[eid] = dataView.getUint8(offset);
-        offset += 1;
-      } else if (arr instanceof Int16Array || $i16 in arr) {
-        arr[eid] = dataView.getInt16(offset);
-        offset += 2;
-      } else if (arr instanceof Uint16Array || $u16 in arr) {
-        arr[eid] = dataView.getUint16(offset);
-        offset += 2;
-      } else if (arr instanceof Int32Array || $i32 in arr) {
-        arr[eid] = dataView.getInt32(offset);
-        offset += 4;
-      } else if (arr instanceof Uint32Array || $u32 in arr || $ref in arr) {
-        const value = dataView.getUint32(offset);
-        if ($ref in arr) {
-          const mapped = entityIdMapping ? entityIdMapping.get(value) ?? value : value;
-          arr[eid] = mapped;
-        } else {
-          arr[eid] = value;
-        }
-        offset += 4;
-      } else if (arr instanceof Float32Array || $f32 in arr) {
-        arr[eid] = dataView.getFloat32(offset);
-        offset += 4;
-      } else {
-        arr[eid] = dataView.getFloat64(offset);
-        offset += 8;
-      }
-    }
-  }
-  return offset;
-}
 var createObserverSerializer = (world, networkedTag, components, options = {}) => {
-  const backingBuffer = options.buffer ?? new ArrayBuffer(1024 * 1024 * 100);
+  const backingBuffer = options.buffer ?? createDefaultSerializationBuffer();
   const dataView = new DataView(backingBuffer);
   let offset = 0;
   const queue = [];
@@ -1038,6 +1081,7 @@ var createObserverSerializer = (world, networkedTag, components, options = {}) =
     offset = 0;
     for (let i = 0; i < queue.length; i++) {
       const [entityId, type, componentId, targetId, relationData] = queue[i];
+      growBuffer(backingBuffer, offset + ROW_HEADROOM);
       dataView.setUint32(offset, entityId);
       offset += 4;
       dataView.setUint8(offset, type);
@@ -1049,7 +1093,7 @@ var createObserverSerializer = (world, networkedTag, components, options = {}) =
           dataView.setUint32(offset, targetId);
           offset += 4;
           if (type === 4 /* AddRelation */ && relationData) {
-            offset = serializeRelationData2(relationData, entityId, dataView, offset);
+            offset = serializeRelationData(relationData, entityId, dataView, offset);
           }
         }
       }
@@ -1102,7 +1146,7 @@ var createObserverDeserializer = (world, networkedTag, components, options = {})
           if (worldTargetId !== void 0) {
             const relationComponent = component(worldTargetId);
             (0, import_bitecs2.addComponent)(world, worldEntityId, relationComponent);
-            offset = deserializeRelationData2(relationComponent, worldEntityId, dataView, offset, currentMapping);
+            offset = deserializeRelationData(relationComponent, worldEntityId, dataView, offset, currentMapping);
           }
         } else if (operationType === 5 /* RemoveRelation */) {
           const worldTargetId = currentMapping.get(targetId);
