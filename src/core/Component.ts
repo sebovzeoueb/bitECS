@@ -87,18 +87,26 @@ const getTransitionEdge = (
 
 	const addTo: Query[] = []
 	const removeFrom: Query[] = []
+	const pairChecked: Query[] = []
 
 	for (const queryData of componentData.queries) {
-		// Pair-filter queries are entity-specific (check relationTargets[eid]),
-		// so they can't be cached per archetype node. They're handled by updatePairQueries.
-		if (queryData.pairFilters.length > 0) continue
+		// Pair-filter queries check relationTargets[eid], so their membership
+		// outcome is per entity and can't be cached on the edge. *Which* of them
+		// this component can affect can be: they go to pairChecked, and
+		// applyTransition re-evaluates each one. updatePairQueries can't cover
+		// them here -- it only runs from the pair add/remove path, and only for
+		// filters matching the pair being changed.
+		if (queryData.pairFilters.length > 0) {
+			pairChecked.push(queryData)
+			continue
+		}
 		if (queryCheckEntity(world, queryData, eid)) addTo.push(queryData)
 		else removeFrom.push(queryData)
 	}
 
 	// Intern the target by the entity's post-op masks (call sites update masks
 	// before transitioning), so identical archetypes share one node and its edges.
-	return node.edges[action] = { target: internArchetypeNode(ctx, eid), addTo, removeFrom, version: ctx.queryVersion }
+	return node.edges[action] = { target: internArchetypeNode(ctx, eid), addTo, removeFrom, pairChecked, version: ctx.queryVersion }
 }
 
 /**
@@ -112,6 +120,15 @@ const applyTransition = (world: World, ctx: WorldContext, eid: EntityId, compone
 	for (let i = 0; i < edge.removeFrom.length; i++) {
 		if (!isAdd) edge.removeFrom[i].toRemove.remove(eid)
 		queryRemoveEntity(world, edge.removeFrom[i], eid)
+	}
+	// Both directions unconditionally, unlike updatePairQueries, which branches
+	// on isAdd: for a query holding this component under Not, an add unmatches
+	// and a remove matches. queryAddEntity and queryRemoveEntity are both already
+	// guarded against redundant calls, so re-evaluating on every transition is safe.
+	for (let i = 0; i < edge.pairChecked.length; i++) {
+		const pairQuery = edge.pairChecked[i]
+		if (queryCheckEntity(world, pairQuery, eid)) queryAddEntity(pairQuery, eid)
+		else queryRemoveEntity(world, pairQuery, eid)
 	}
 }
 

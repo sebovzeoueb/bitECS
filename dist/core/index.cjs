@@ -1179,12 +1179,16 @@ var getTransitionEdge = (world, ctx, node, eid, componentData, isAdd) => {
   if (edge !== void 0 && edge.version === ctx.queryVersion) return edge;
   const addTo = [];
   const removeFrom = [];
+  const pairChecked = [];
   for (const queryData of componentData.queries) {
-    if (queryData.pairFilters.length > 0) continue;
+    if (queryData.pairFilters.length > 0) {
+      pairChecked.push(queryData);
+      continue;
+    }
     if (queryCheckEntity(world, queryData, eid)) addTo.push(queryData);
     else removeFrom.push(queryData);
   }
-  return node.edges[action] = { target: internArchetypeNode(ctx, eid), addTo, removeFrom, version: ctx.queryVersion };
+  return node.edges[action] = { target: internArchetypeNode(ctx, eid), addTo, removeFrom, pairChecked, version: ctx.queryVersion };
 };
 var applyTransition = (world, ctx, eid, componentData, isAdd) => {
   const node = ctx.entityArchetypes[eid] || ctx.rootArchetype;
@@ -1194,6 +1198,11 @@ var applyTransition = (world, ctx, eid, componentData, isAdd) => {
   for (let i = 0; i < edge.removeFrom.length; i++) {
     if (!isAdd) edge.removeFrom[i].toRemove.remove(eid);
     queryRemoveEntity(world, edge.removeFrom[i], eid);
+  }
+  for (let i = 0; i < edge.pairChecked.length; i++) {
+    const pairQuery = edge.pairChecked[i];
+    if (queryCheckEntity(world, pairQuery, eid)) queryAddEntity(pairQuery, eid);
+    else queryRemoveEntity(world, pairQuery, eid);
   }
 };
 var isPrefabEntity = (ctx, eid) => {

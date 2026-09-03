@@ -11,6 +11,7 @@ export type ArchetypeEdge = {
     target: ArchetypeNode;
     addTo: Query[];
     removeFrom: Query[];
+    pairChecked: Query[];
     version: number;
 };
 export type RelationEntry = {

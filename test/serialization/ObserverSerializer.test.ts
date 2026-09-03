@@ -514,3 +514,42 @@ describe('ObserverSerializer and ObserverDeserializer', () => {
         expect(insertedRandoms.length).toBe(1)
     })
 })
+
+// The game's shape: the serializer's networked tag is a specific relation pair (a per-client
+// interest set), so every subscription it registers is a pair-filtered query, while the receiving
+// side uses a plain tag. Before the pair-filter fix in Component.ts, a component was announced only
+// if it was already present when the entity entered the interest -- an add afterwards produced no op
+// at all, which is what stopped hit markers from ever reaching other clients.
+describe('ObserverSerializer with a pair networked tag', () => {
+    it('should emit component ops for an entity already carrying the pair tag', () => {
+        const world = createWorld()
+        const Interest = createRelation()
+        const Hit = {}
+        const clientTag = {}
+
+        const slot = addEntity(world)
+        const serialize = createObserverSerializer(world, Interest(slot), [Hit])
+
+        const tree = addEntity(world)
+        addComponent(world, tree, Interest(slot))
+        serialize() // drain the AddEntity op so the next packet is only about Hit
+
+        addComponent(world, tree, Hit)
+
+        const clientWorld = createWorld()
+        const idMap = new Map<number, number>()
+        const deserialize = createObserverDeserializer(clientWorld, clientTag, [Hit], { idMap })
+        // the client learns of the entity from the drained packet in the real thing; here it is
+        // enough to pre-map it, which is what a snapshot arriving first also does
+        const clientTree = addEntity(clientWorld)
+        idMap.set(tree, clientTree)
+        addComponent(clientWorld, clientTree, clientTag)
+
+        deserialize(serialize())
+        expect(hasComponent(clientWorld, clientTree, Hit)).toBe(true)
+
+        removeComponent(world, tree, Hit)
+        deserialize(serialize())
+        expect(hasComponent(clientWorld, clientTree, Hit)).toBe(false)
+    })
+})

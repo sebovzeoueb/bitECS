@@ -24,6 +24,10 @@ export type ArchetypeEdge = {
     target: ArchetypeNode
     addTo: Query[]
     removeFrom: Query[]
+    // Pair-filtered queries this component can affect. Which queries those are
+    // depends only on the component, so it caches here like addTo/removeFrom;
+    // only the membership outcome is per entity, so applyTransition evaluates it.
+    pairChecked: Query[]
     // Query version this edge was computed under; a stale stamp means a
     // query was registered or removed since, so the edge must be recomputed.
     version: number

@@ -14,6 +14,7 @@ import {
 	And,
 	observe,
 	onAdd,
+	onRemove,
 	Hierarchy,
 	Cascade,
 	createRelation,
@@ -1276,5 +1277,103 @@ describe('Hierarchy internals', () => {
 		expect(order.indexOf(root)).toBeLessThan(order.indexOf(a))
 		expect(order.indexOf(a)).toBeLessThan(order.indexOf(b))
 		expect(order.indexOf(b)).toBeLessThan(order.indexOf(c))
+	})
+})
+
+// Regression coverage for pair-filtered queries missing plain component changes. getTransitionEdge
+// used to skip every query with pair filters on a plain add or remove, on the grounds that
+// updatePairQueries handled them -- but that only runs from the pair add/remove path, and only for
+// filters matching the pair being changed. The result was a query whose membership contradicted its
+// own predicate, with no observer notification either.
+//
+// Every case here registers the query *before* the change under test. A first query() call made
+// afterwards seeds its own membership through queryCheckEntity and passes regardless, which would
+// make the test worthless.
+describe('Pair-filtered queries', () => {
+	it('should see a plain component added after the pair', () => {
+		const world = createWorld()
+		const Interest = createRelation()
+		const Hit = {}
+		const slot = addEntity(world)
+		const eid = addEntity(world)
+
+		addComponent(world, eid, Interest(slot))
+		expect(query(world, [Interest(slot), Hit])).toEqual([])
+
+		addComponent(world, eid, Hit)
+		expect(query(world, [Interest(slot), Hit])).toEqual([eid])
+	})
+
+	it('should see a plain component removed after the pair', () => {
+		const world = createWorld()
+		const Interest = createRelation()
+		const Hit = {}
+		const slot = addEntity(world)
+		const eid = addEntity(world)
+
+		addComponent(world, eid, Interest(slot))
+		addComponent(world, eid, Hit)
+		expect(query(world, [Interest(slot), Hit])).toEqual([eid])
+
+		removeComponent(world, eid, Hit)
+		expect(query(world, [Interest(slot), Hit])).toEqual([])
+	})
+
+	it('should notify observers of a plain component change after the pair', () => {
+		const world = createWorld()
+		const Interest = createRelation()
+		const Hit = {}
+		const slot = addEntity(world)
+		const eid = addEntity(world)
+
+		addComponent(world, eid, Interest(slot))
+
+		const added: number[] = []
+		const removed: number[] = []
+		observe(world, onAdd(Interest(slot), Hit), e => added.push(e))
+		observe(world, onRemove(Interest(slot), Hit), e => removed.push(e))
+
+		addComponent(world, eid, Hit)
+		expect(added).toEqual([eid])
+
+		removeComponent(world, eid, Hit)
+		expect(removed).toEqual([eid])
+	})
+
+	it('should keep discriminating between targets when a plain component changes', () => {
+		const world = createWorld()
+		const Interest = createRelation()
+		const Hit = {}
+		const slotA = addEntity(world)
+		const slotB = addEntity(world)
+		const watched = addEntity(world)
+		const unwatched = addEntity(world)
+
+		addComponent(world, watched, Interest(slotA))
+		addComponent(world, unwatched, Interest(slotB))
+		expect(query(world, [Interest(slotA), Hit])).toEqual([])
+
+		addComponent(world, watched, Hit)
+		addComponent(world, unwatched, Hit)
+		expect(query(world, [Interest(slotA), Hit])).toEqual([watched])
+		expect(query(world, [Interest(slotB), Hit])).toEqual([unwatched])
+	})
+
+	it('should re-evaluate a Not term when the plain component changes', () => {
+		const world = createWorld()
+		const Interest = createRelation()
+		const Hit = {}
+		const slot = addEntity(world)
+		const eid = addEntity(world)
+
+		addComponent(world, eid, Interest(slot))
+		expect(query(world, [Interest(slot), Not(Hit)])).toEqual([eid])
+
+		// an add *unmatches* here, which is why applyTransition has to evaluate both directions
+		addComponent(world, eid, Hit)
+		expect(query(world, [Interest(slot), Not(Hit)])).toEqual([])
+
+		removeComponent(world, eid, Hit)
+		expect(query(world, [Interest(slot), Not(Hit)])).toEqual([eid])
 	})
 })
