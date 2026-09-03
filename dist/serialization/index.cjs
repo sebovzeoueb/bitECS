@@ -1130,8 +1130,8 @@ var createObserverDeserializer = (world, networkedTag, components, options = {})
           worldEntityId = (0, import_bitecs2.addEntity)(world);
           currentMapping.set(packetEntityId, worldEntityId);
           (0, import_bitecs2.addComponent)(world, worldEntityId, networkedTag);
-        } else {
-          console.warn(`Attempted to deserialize addEntity with ID ${packetEntityId}, but it has already been deserialzied and exists in the mapping.`);
+        } else if ((0, import_bitecs2.entityExists)(world, worldEntityId)) {
+          (0, import_bitecs2.addComponent)(world, worldEntityId, networkedTag);
         }
       } else if (worldEntityId !== void 0 && (0, import_bitecs2.entityExists)(world, worldEntityId)) {
         if (operationType === 1 /* RemoveEntity */) {

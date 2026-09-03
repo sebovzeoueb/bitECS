@@ -553,3 +553,32 @@ describe('ObserverSerializer with a pair networked tag', () => {
         expect(hasComponent(clientWorld, clientTree, Hit)).toBe(false)
     })
 })
+
+// A shared id map is the normal case in a game: a snapshot introduces an entity over one channel and
+// the observer stream announces it over another, so an AddEntity op for an entity that is already
+// mapped is redundant rather than wrong. Upstream warns and drops it, which loses the networked tag
+// for an entity that arrived without one.
+describe('ObserverDeserializer with a shared id map', () => {
+    it('should treat a redundant AddEntity as idempotent and ensure the tag', () => {
+        const world = createWorld()
+        const networkedTag = {}
+        const Position = {}
+
+        const serialize = createObserverSerializer(world, networkedTag, [Position])
+        const entity = addEntity(world)
+        addComponent(world, entity, networkedTag)
+
+        const clientWorld = createWorld()
+        // the snapshot's half: the entity is already mapped, and carries no tag yet
+        const idMap = new Map<number, number>()
+        const clientEntity = addEntity(clientWorld)
+        idMap.set(entity, clientEntity)
+
+        const deserialize = createObserverDeserializer(clientWorld, networkedTag, [Position], { idMap })
+        deserialize(serialize())
+
+        expect(entityExists(clientWorld, clientEntity)).toBe(true)
+        expect(hasComponent(clientWorld, clientEntity, networkedTag)).toBe(true)
+        expect(idMap.get(entity)).toBe(clientEntity) // still the same entity, not a duplicate
+    })
+})

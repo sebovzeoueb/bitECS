@@ -165,10 +165,13 @@ export const createObserverDeserializer = (world: World, networkedTag: Component
                     worldEntityId = addEntity(world)
                     currentMapping.set(packetEntityId, worldEntityId)
                     addComponent(world, worldEntityId, networkedTag)
-                } else {
-                    // TODO: figure out if this should ignore, throw, warn, or if the observer serializer should maybe do a snapshot on first call?
-                    // throw new Error(`Entity with ID ${packetEntityId} already exists in the mapping.`)
-                    console.warn(`Attempted to deserialize addEntity with ID ${packetEntityId}, but it has already been deserialzied and exists in the mapping.`)
+                } else if (entityExists(world, worldEntityId)) {
+                    // Idempotent: the entity is already mapped, so this add is redundant rather than
+                    // wrong. That happens whenever an id map is shared with another deserializer --
+                    // a snapshot can introduce an entity before the observer stream announces it --
+                    // and it is the only sane outcome, since the mapping already resolves correctly.
+                    // Ensure the tag anyway, because the entity may have arrived without it.
+                    addComponent(world, worldEntityId, networkedTag)
                 }
             } else if (worldEntityId !== undefined && entityExists(world, worldEntityId)) {
                 if (operationType === OperationType.RemoveEntity) {

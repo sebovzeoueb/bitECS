@@ -745,8 +745,8 @@ var createObserverDeserializer = (world, networkedTag, components, options = {})
           worldEntityId = addEntity(world);
           currentMapping.set(packetEntityId, worldEntityId);
           addComponent(world, worldEntityId, networkedTag);
-        } else {
-          console.warn(`Attempted to deserialize addEntity with ID ${packetEntityId}, but it has already been deserialzied and exists in the mapping.`);
+        } else if (entityExists(world, worldEntityId)) {
+          addComponent(world, worldEntityId, networkedTag);
         }
       } else if (worldEntityId !== void 0 && entityExists(world, worldEntityId)) {
         if (operationType === 1 /* RemoveEntity */) {
