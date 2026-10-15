@@ -343,7 +343,8 @@ export const removeQueryFromWorld = (world: World, query: Query) => {
 		else if ('entity' in filter) unindexQuery(ctx.queriesByEntity, filter.entity, query)
 		else unindexQuery(ctx.queriesByRelation, filter.relation, query)
 	}
-	invalidateArchetypeTransitions(ctx)
+	// Edges never hold specific-target queries (see getTransitionEdge), so those leave them valid.
+	if (!query.hasTargetFilters) invalidateArchetypeTransitions(ctx)
 }
 
 /**
@@ -483,8 +484,9 @@ export const registerQuery = (world: World, terms: QueryTerm[], options: { buffe
 	}
 
 	// New queries change the cached transition results, but existing entities
-	// must retain the nodes that identify their current archetypes.
-	invalidateArchetypeTransitions(ctx)
+	// must retain the nodes that identify their current archetypes. Edges never
+	// hold specific-target queries, so registering one leaves them valid.
+	if (!query.hasTargetFilters) invalidateArchetypeTransitions(ctx)
 
 	// Populate initial query membership
 	const hasTargetFilters = pairFilters.some(f => 'target' in f)

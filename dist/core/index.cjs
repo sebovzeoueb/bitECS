@@ -856,7 +856,7 @@ var removeQueryFromWorld = (world, query2) => {
     else if ("entity" in filter) unindexQuery(ctx.queriesByEntity, filter.entity, query2);
     else unindexQuery(ctx.queriesByRelation, filter.relation, query2);
   }
-  invalidateArchetypeTransitions(ctx);
+  if (!query2.hasTargetFilters) invalidateArchetypeTransitions(ctx);
 };
 var isCacheablePairTerm = (term) => typeof term === "object" && term !== null && term[$isPairComponent] && !isWildcard(term[$relation]) && term[$pairTarget] !== Wildcard;
 var registerQuery = (world, terms, options = {}) => {
@@ -966,7 +966,7 @@ var registerQuery = (world, terms, options = {}) => {
     else if ("entity" in filter) indexQuery(ctx.queriesByEntity, filter.entity, query2);
     else indexQuery(ctx.queriesByRelation, filter.relation, query2);
   }
-  invalidateArchetypeTransitions(ctx);
+  if (!query2.hasTargetFilters) invalidateArchetypeTransitions(ctx);
   const hasTargetFilters = pairFilters.some((f) => "target" in f);
   const hasWildcardFilters = pairFilters.some((f) => !("target" in f));
   if (pairFilters.length > 0 && queryComponents.length === 0 && hasWildcardFilters) {

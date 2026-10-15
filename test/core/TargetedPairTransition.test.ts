@@ -301,3 +301,71 @@ describe('Targeted pair queries: differential against hasComponent', () => {
         }
     })
 })
+
+describe('Specific-target queries leave cached archetype edges valid (FORK section 4)', () => {
+    it('only queries that edges can hold bump the query version', () => {
+        const world = createWorld()
+        const ChildOf = createRelation()
+        const A = {}
+        const parent = addEntity(world)
+        const ctx = (world as any)[$internal]
+        const before = ctx.queryVersion
+        query(world, [ChildOf(parent)])
+        query(world, [ChildOf(parent), A])
+        removeQuery(world, [ChildOf(parent)])
+        expect(ctx.queryVersion).toBe(before)
+        query(world, [A])
+        expect(ctx.queryVersion).toBe(before + 1)
+        query(world, [ChildOf(Wildcard), A])
+        expect(ctx.queryVersion).toBe(before + 2)
+        removeEntity(world, parent) // evicts [ChildOf(parent), A]
+        expect(ctx.queryVersion).toBe(before + 2)
+    })
+
+    it('plain query membership stays right while targeted queries churn', () => {
+        const rand = prng(0xED6E)
+        const pick = <T>(arr: T[]): T => arr[Math.floor(rand() * arr.length)]
+        const world = createWorld()
+        const ChildOf = createRelation()
+        const Pos = {}, Vel = {}, Tag = {}
+        const plain = [Pos, Vel, Tag]
+        const has = (e: number, c: any) => hasComponent(world, e, c)
+        const specs: { terms: any[], check: (e: number) => boolean }[] = [
+            { terms: [Pos, Vel], check: e => has(e, Pos) && has(e, Vel) },
+            { terms: [Pos, Not(Tag)], check: e => has(e, Pos) && !has(e, Tag) },
+            { terms: [Tag], check: e => has(e, Tag) },
+            { terms: [ChildOf(Wildcard), Vel], check: e => has(e, ChildOf(Wildcard)) && has(e, Vel) },
+        ]
+        for (const s of specs) query(world, s.terms)
+        const parents = Array.from({ length: 10 }, () => addEntity(world))
+        const alive: number[] = []
+        for (let i = 0; i < 30; i++) alive.push(addEntity(world))
+        const targeted: any[][] = []
+
+        for (let step = 0; step < 3000; step++) {
+            const roll = rand()
+            if (roll < 0.3) addComponent(world, pick(alive), pick(plain))
+            else if (roll < 0.45) removeComponent(world, pick(alive), pick(plain))
+            else if (roll < 0.55) addComponent(world, pick(alive), ChildOf(pick(parents)))
+            else if (roll < 0.62) removeComponent(world, pick(alive), ChildOf(pick(parents)))
+            else if (roll < 0.75) {
+                const terms = rand() < 0.5 ? [ChildOf(pick(parents))] : [ChildOf(pick(parents)), pick(plain)]
+                query(world, terms)
+                targeted.push(terms)
+            } else if (roll < 0.85) {
+                if (targeted.length) removeQuery(world, targeted.splice(Math.floor(rand() * targeted.length), 1)[0])
+            } else if (roll < 0.9) {
+                const i = Math.floor(rand() * parents.length)
+                removeEntity(world, parents[i]) // releases its targeted queries
+                parents[i] = addEntity(world)
+            } else if (roll < 0.95) alive.push(addEntity(world))
+            else if (alive.length > 5) removeEntity(world, alive.splice(Math.floor(rand() * alive.length), 1)[0])
+            for (const s of specs) {
+                const got = members(world, s.terms)
+                for (const e of alive) {
+                    if (got.has(e) !== s.check(e)) throw new Error(`step ${step}: entity ${e} member=${got.has(e)} expected=${s.check(e)}`)
+                }
+            }
+        }
+    })
+})

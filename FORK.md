@@ -120,6 +120,21 @@ Writing it surfaced three pre-existing membership disagreements, excluded from i
   `updatePairQueries`' by-relation and by-entity branches add without re-checking the other terms.
 - `Not(Relation(target))` compiles to the relation's bitflag, so it means "no pair of that relation".
 
+## 4. `src/core/Query.ts` — specific-target queries no longer invalidate cached archetype edges
+
+Performance only; membership results are unchanged. `registerQuery` and `removeQueryFromWorld`
+bumped `ctx.queryVersion` for every query, which makes every cached archetype edge recompute
+(`queryCheckEntity` over all of a component's queries) on its next use. Since patch 3, edges never
+hold queries with `hasTargetFilters`, so registering or removing one cannot change any edge, and the
+bump is skipped for them. The game registers and evicts one `[ChildOf(parent)]`, `InChunk(chunk)` or
+tilemap-layer query per parent or chunk as the player walks, so the version moved ~6,850 times per
+probe session against 106 after the patch, and edges were almost never reused while chunk
+snapshots deserialized.
+
+Coverage: `test/core/TargetedPairTransition.test.ts` › `Specific-target queries leave cached
+archetype edges valid`. The version test fails before the patch; the seeded 3,000-step differential
+with targeted queries registered, removed and evicted between operations passes before and after.
+
 ## Working on this fork
 
 ```bash
