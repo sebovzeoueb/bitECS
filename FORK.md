@@ -70,6 +70,9 @@ client, and only for the handful of replicated components.
 `relationTargets` map remembers a single target per component index. Every networked relation in the
 game is exclusive, so this is latent.
 
+Since patch 3, queries with a specific-target filter are evaluated through an index instead of
+`pairChecked`; only wildcard-only pair queries remain on the edge.
+
 ## 2. `src/serialization/ObserverSerializer.ts` — redundant `AddEntity` is idempotent
 
 `createObserverDeserializer` warned and dropped an `AddEntity` op for an entity already in the id
@@ -81,6 +84,42 @@ on the receiving side.
 
 Now it ensures the tag instead, guarded on `entityExists`.
 
+## 3. `src/core/Component.ts`, `src/core/Query.ts`, `src/core/Entity.ts` — targeted pair queries without a scan
+
+Performance only; membership results are unchanged. Patch 1 put every pair-filtered query of a
+component on the edge's `pairChecked` list and evaluated all of them on every transition. The game
+registers one `[ChildOf(parent)]` query per parent it traverses (~1,800 live in a city), so every
+first or last `ChildOf` pair (each building foundation created or unloaded) ran ~1,800
+`queryCheckEntity` calls: 5–6 s of client main thread per 40 s walk.
+
+A query with a specific-target filter (`{relation, target}`) can only change membership for an entity
+that has that pair, or that still holds the entity through a pair just removed. So:
+
+- `ComponentData.targetedQueries: Map<target, Set<Query>>` indexes, per component, its queries with
+  a specific-target filter (maintained in `registerQuery` / `removeQueryFromWorld`); `Query` gains
+  `hasTargetFilters`.
+- `getTransitionEdge` leaves those queries off `pairChecked` (wildcard-only pair queries stay on it).
+- `applyTransition` collects candidates from `targetedQueries` for each of the entity's current
+  targets plus `removedTarget` (passed by `removeComponentInternal` when the last target of a relation
+  goes), then evaluates them exactly as before. Candidates are collected into a reusable stack segment
+  before any observer runs, so reentrant transitions are safe.
+- `removeEntity` skips `queryRemoveEntity` (a no-op) for queries that don't contain the entity before
+  touching its visited set.
+
+The per-component index matters for the server: a per-target index alone reached ~60 observer
+queries per `ClientInterest(slot)` target and made component toggles on interest entities ~5× slower.
+
+Coverage: `test/core/TargetedPairTransition.test.ts`, including a seeded 2,000-operation differential
+test against `hasComponent`-derived expectations that passes on the code before and after this patch.
+Writing it surfaced three pre-existing membership disagreements, excluded from it and left unchanged
+(membership changes are out of scope for a perf patch):
+
+- `[Wildcard(p)]` is populated and updated as "targets of p" but `queryCheckEntity`/`hasComponent`
+  read it as "has a relation pointing at p".
+- Mixed wildcard filters with other terms (`[ChildOf(p), Wildcard(Slot)]`, `[Wildcard(p), Tag]`):
+  `updatePairQueries`' by-relation and by-entity branches add without re-checking the other terms.
+- `Not(Relation(target))` compiles to the relation's bitflag, so it means "no pair of that relation".
+
 ## Working on this fork
 
 ```bash
@@ -88,7 +127,7 @@ bun test                        # tests import from src/, so they pass before a 
 bun run build                   # consumers import dist/
 ```
 
-Regression coverage for both patches:
+Regression coverage for patches 1 and 2 (patch 3 has its own test file):
 
 - `test/core/Query.test.ts` › `Pair-filtered queries` — a plain component added and removed after the
   pair, observer notification, the pair term still discriminating between two targets, and a `Not`

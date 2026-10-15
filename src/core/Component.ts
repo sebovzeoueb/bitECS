@@ -30,6 +30,8 @@ export interface ComponentData {
 	bitflag: number
 	ref: ComponentRef
 	queries: Set<Query>
+	/** queries in `queries` with a specific-target pair filter, keyed by that target */
+	targetedQueries: Map<any, Set<Query>>
 	setObservable: Observable
 	getObservable: Observable
 }
@@ -91,11 +93,10 @@ const getTransitionEdge = (
 
 	for (const queryData of componentData.queries) {
 		// Pair-filter queries check relationTargets[eid], so their membership
-		// outcome is per entity and can't be cached on the edge. *Which* of them
-		// this component can affect can be: they go to pairChecked, and
-		// applyTransition re-evaluates each one. updatePairQueries can't cover
-		// them here -- it only runs from the pair add/remove path, and only for
-		// filters matching the pair being changed.
+		// outcome is per entity and can't be cached on the edge. Queries with a
+		// specific-target filter are reached through targetedQueries instead
+		// (see applyTargetedTransition); only wildcard-only pair queries go here.
+		if (queryData.hasTargetFilters) continue
 		if (queryData.pairFilters.length > 0) {
 			pairChecked.push(queryData)
 			continue
@@ -109,10 +110,64 @@ const getTransitionEdge = (
 	return node.edges[action] = { target: internArchetypeNode(ctx, eid), addTo, removeFrom, pairChecked, version: ctx.queryVersion }
 }
 
+// Candidate queries for targeted re-evaluation. Used as a stack: a nested
+// applyTransition (fired by an observer) pushes above the current segment and
+// truncates back to its own start, so an outer segment stays intact.
+const targetedScratch: Query[] = []
+
+/**
+ * Pushes this component's specific-target queries for one target, skipping
+ * any already in the current segment.
+ */
+const pushTargetedQueries = (componentData: ComponentData, target: any, start: number) => {
+	const byTarget = componentData.targetedQueries.get(target)
+	if (!byTarget) return
+	for (const q of byTarget) {
+		let seen = false
+		for (let i = start; i < targetedScratch.length; i++) {
+			if (targetedScratch[i] === q) { seen = true; break }
+		}
+		if (!seen) targetedScratch.push(q)
+	}
+}
+
+/**
+ * Re-evaluates the specific-target pair queries this component can affect.
+ * A targeted query can only change membership for this entity if the entity
+ * still has its target (relationTargets) or the entity is already a member
+ * because of a pair that was just removed (removedTarget). Both are reached
+ * through componentData.targetedQueries, so no per-query scan is needed.
+ * No user code runs during collection, so the Maps/Sets are read live.
+ */
+const applyTargetedTransition = (world: World, ctx: WorldContext, eid: EntityId, componentData: ComponentData, removedTarget: any) => {
+	const start = targetedScratch.length
+	try {
+		const relTargets = ctx.relationTargets[eid]
+		if (relTargets) {
+			for (const targets of relTargets.values()) {
+				for (const target of targets) pushTargetedQueries(componentData, target, start)
+			}
+		}
+		if (removedTarget !== undefined) pushTargetedQueries(componentData, removedTarget, start)
+
+		// Observers may mutate the index, so evaluate the collected segment only.
+		const end = targetedScratch.length
+		for (let i = start; i < end; i++) {
+			const q = targetedScratch[i]
+			if (queryCheckEntity(world, q, eid)) queryAddEntity(q, eid)
+			else queryRemoveEntity(world, q, eid)
+		}
+	} finally {
+		targetedScratch.length = start
+	}
+}
+
 /**
  * Applies a cached archetype transition to an entity, updating query membership.
+ * removedTarget is set when a specific pair was just removed, so queries that
+ * still hold the entity through that target are re-checked.
  */
-const applyTransition = (world: World, ctx: WorldContext, eid: EntityId, componentData: ComponentData, isAdd: boolean) => {
+const applyTransition = (world: World, ctx: WorldContext, eid: EntityId, componentData: ComponentData, isAdd: boolean, removedTarget?: any) => {
 	const node = ctx.entityArchetypes[eid] || ctx.rootArchetype
 	const edge = getTransitionEdge(world, ctx, node, eid, componentData, isAdd)
 	ctx.entityArchetypes[eid] = edge.target
@@ -130,6 +185,7 @@ const applyTransition = (world: World, ctx: WorldContext, eid: EntityId, compone
 		if (queryCheckEntity(world, pairQuery, eid)) queryAddEntity(pairQuery, eid)
 		else queryRemoveEntity(world, pairQuery, eid)
 	}
+	applyTargetedTransition(world, ctx, eid, componentData, removedTarget)
 }
 
 /**
@@ -229,6 +285,7 @@ export const registerComponent = (world: World, component: ComponentRef) => {
 		bitflag: isSpecificPair ? 0 : ctx.bitflag,
 		ref: component,
 		queries: new Set<Query>(),
+		targetedQueries: new Map(),
 		setObservable: createObservable(),
 		getObservable: createObservable(),
 	}
@@ -690,7 +747,7 @@ const removeComponentInternal = (world: World, ctx: WorldContext, eid: EntityId,
 				const { generationId: relGenId, bitflag: relBit } = relData
 				if ((ctx.entityMasks[relGenId][eid] & relBit) === relBit) {
 					ctx.entityMasks[relGenId][eid] &= ~relBit
-					applyTransition(world, ctx, eid, relData, false)
+					applyTransition(world, ctx, eid, relData, false, target)
 				}
 			}
 		}

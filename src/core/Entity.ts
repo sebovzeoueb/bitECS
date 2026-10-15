@@ -108,6 +108,7 @@ export const removeEntity = (world: World, eid: EntityId) => {
 				const compData = ctx.componentMap.get(comp)
 				if (compData) {
 					for (const q of compData.queries) {
+						if (!q.has(currentEid)) continue
 						if (!visited.has(q)) { visited.add(q); queryRemoveEntity(world, q, currentEid) }
 					}
 				}
@@ -116,6 +117,7 @@ export const removeEntity = (world: World, eid: EntityId) => {
 					const relData = ctx.componentMap.get(comp[$relation])
 					if (relData) {
 						for (const q of relData.queries) {
+							if (!q.has(currentEid)) continue
 							if (!visited.has(q)) { visited.add(q); queryRemoveEntity(world, q, currentEid) }
 						}
 					}

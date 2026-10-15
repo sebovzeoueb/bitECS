@@ -29,6 +29,7 @@ export type Query = SparseSet & {
     removeObservable: ReturnType<typeof createObservable>;
     queues: Record<any, any>;
     pairFilters: PairFilter[];
+    hasTargetFilters: boolean;
     componentsData: ComponentData[];
     hash: string;
     pairComponent?: ComponentRef;

@@ -40,6 +40,7 @@ export type Query = SparseSet & {
 	removeObservable: ReturnType<typeof createObservable>
 	queues: Record<any, any>
 	pairFilters: PairFilter[]
+	hasTargetFilters: boolean
 	componentsData: ComponentData[]
 	hash: string
 	pairComponent?: ComponentRef
@@ -332,6 +333,9 @@ export const removeQueryFromWorld = (world: World, query: Query) => {
 	ctx.dirtyQueries.delete(query)
 	for (let i = 0; i < query.componentsData.length; i++) {
 		query.componentsData[i].queries.delete(query)
+		for (const filter of query.pairFilters) {
+			if ('target' in filter) unindexQuery(query.componentsData[i].targetedQueries, filter.target, query)
+		}
 	}
 	for (let i = 0; i < query.pairFilters.length; i++) {
 		const filter = query.pairFilters[i]
@@ -451,7 +455,7 @@ export const registerQuery = (world: World, terms: QueryTerm[], options: { buffe
 	const query = Object.assign(options.buffered ? createUint32SparseSet() : createSparseSet(), {
 		masks, notMasks, orMasks, hasMasks, hasOrTerms, generations,
 		toRemove: createSparseSet(), addObservable: createObservable(), removeObservable: createObservable(), queues: {},
-		pairFilters, componentsData: allComponentsData, hash,
+		pairFilters, hasTargetFilters: pairFilters.some(f => 'target' in f), componentsData: allComponentsData, hash,
 		pairComponent: isSingleSpecificPair ? terms[0] : undefined
 	}) as Query
 
@@ -462,6 +466,9 @@ export const registerQuery = (world: World, terms: QueryTerm[], options: { buffe
 	if (isSingleSpecificPair) ctx.pairQueryMap.set(terms[0], query)
 	for (let i = 0; i < allComponentsData.length; i++) {
 		allComponentsData[i].queries.add(query)
+		for (const filter of pairFilters) {
+			if ('target' in filter) indexQuery(allComponentsData[i].targetedQueries, filter.target, query)
+		}
 	}
 
 	if (notComponents.length) ctx.notQueries.add(query)

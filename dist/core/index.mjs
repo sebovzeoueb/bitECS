@@ -756,6 +756,9 @@ var removeQueryFromWorld = (world, query2) => {
   ctx.dirtyQueries.delete(query2);
   for (let i = 0; i < query2.componentsData.length; i++) {
     query2.componentsData[i].queries.delete(query2);
+    for (const filter of query2.pairFilters) {
+      if ("target" in filter) unindexQuery(query2.componentsData[i].targetedQueries, filter.target, query2);
+    }
   }
   for (let i = 0; i < query2.pairFilters.length; i++) {
     const filter = query2.pairFilters[i];
@@ -852,6 +855,7 @@ var registerQuery = (world, terms, options = {}) => {
     removeObservable: createObservable(),
     queues: {},
     pairFilters,
+    hasTargetFilters: pairFilters.some((f) => "target" in f),
     componentsData: allComponentsData,
     hash,
     pairComponent: isSingleSpecificPair ? terms[0] : void 0
@@ -861,6 +865,9 @@ var registerQuery = (world, terms, options = {}) => {
   if (isSingleSpecificPair) ctx.pairQueryMap.set(terms[0], query2);
   for (let i = 0; i < allComponentsData.length; i++) {
     allComponentsData[i].queries.add(query2);
+    for (const filter of pairFilters) {
+      if ("target" in filter) indexQuery(allComponentsData[i].targetedQueries, filter.target, query2);
+    }
   }
   if (notComponents.length) ctx.notQueries.add(query2);
   for (let i = 0; i < pairFilters.length; i++) {
@@ -1091,6 +1098,7 @@ var getTransitionEdge = (world, ctx, node, eid, componentData, isAdd) => {
   const removeFrom = [];
   const pairChecked = [];
   for (const queryData of componentData.queries) {
+    if (queryData.hasTargetFilters) continue;
     if (queryData.pairFilters.length > 0) {
       pairChecked.push(queryData);
       continue;
@@ -1100,7 +1108,42 @@ var getTransitionEdge = (world, ctx, node, eid, componentData, isAdd) => {
   }
   return node.edges[action] = { target: internArchetypeNode(ctx, eid), addTo, removeFrom, pairChecked, version: ctx.queryVersion };
 };
-var applyTransition = (world, ctx, eid, componentData, isAdd) => {
+var targetedScratch = [];
+var pushTargetedQueries = (componentData, target, start) => {
+  const byTarget = componentData.targetedQueries.get(target);
+  if (!byTarget) return;
+  for (const q of byTarget) {
+    let seen = false;
+    for (let i = start; i < targetedScratch.length; i++) {
+      if (targetedScratch[i] === q) {
+        seen = true;
+        break;
+      }
+    }
+    if (!seen) targetedScratch.push(q);
+  }
+};
+var applyTargetedTransition = (world, ctx, eid, componentData, removedTarget) => {
+  const start = targetedScratch.length;
+  try {
+    const relTargets = ctx.relationTargets[eid];
+    if (relTargets) {
+      for (const targets of relTargets.values()) {
+        for (const target of targets) pushTargetedQueries(componentData, target, start);
+      }
+    }
+    if (removedTarget !== void 0) pushTargetedQueries(componentData, removedTarget, start);
+    const end = targetedScratch.length;
+    for (let i = start; i < end; i++) {
+      const q = targetedScratch[i];
+      if (queryCheckEntity(world, q, eid)) queryAddEntity(q, eid);
+      else queryRemoveEntity(world, q, eid);
+    }
+  } finally {
+    targetedScratch.length = start;
+  }
+};
+var applyTransition = (world, ctx, eid, componentData, isAdd, removedTarget) => {
   const node = ctx.entityArchetypes[eid] || ctx.rootArchetype;
   const edge = getTransitionEdge(world, ctx, node, eid, componentData, isAdd);
   ctx.entityArchetypes[eid] = edge.target;
@@ -1114,6 +1157,7 @@ var applyTransition = (world, ctx, eid, componentData, isAdd) => {
     if (queryCheckEntity(world, pairQuery, eid)) queryAddEntity(pairQuery, eid);
     else queryRemoveEntity(world, pairQuery, eid);
   }
+  applyTargetedTransition(world, ctx, eid, componentData, removedTarget);
 };
 var isPrefabEntity = (ctx, eid) => {
   if (!ctx.prefabData) return false;
@@ -1188,6 +1232,7 @@ var registerComponent = (world, component) => {
     bitflag: isSpecificPair ? 0 : ctx.bitflag,
     ref: component,
     queries: /* @__PURE__ */ new Set(),
+    targetedQueries: /* @__PURE__ */ new Map(),
     setObservable: createObservable(),
     getObservable: createObservable()
   };
@@ -1488,7 +1533,7 @@ var removeComponentInternal = (world, ctx, eid, component) => {
         const { generationId: relGenId, bitflag: relBit } = relData;
         if ((ctx.entityMasks[relGenId][eid] & relBit) === relBit) {
           ctx.entityMasks[relGenId][eid] &= ~relBit;
-          applyTransition(world, ctx, eid, relData, false);
+          applyTransition(world, ctx, eid, relData, false, target);
         }
       }
     }
@@ -1593,6 +1638,7 @@ var removeEntity = (world, eid) => {
         const compData = ctx.componentMap.get(comp);
         if (compData) {
           for (const q of compData.queries) {
+            if (!q.has(currentEid)) continue;
             if (!visited.has(q)) {
               visited.add(q);
               queryRemoveEntity(world, q, currentEid);
@@ -1603,6 +1649,7 @@ var removeEntity = (world, eid) => {
           const relData = ctx.componentMap.get(comp[$relation]);
           if (relData) {
             for (const q of relData.queries) {
+              if (!q.has(currentEid)) continue;
               if (!visited.has(q)) {
                 visited.add(q);
                 queryRemoveEntity(world, q, currentEid);

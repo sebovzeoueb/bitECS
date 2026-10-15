@@ -9,6 +9,7 @@ export interface ComponentData {
     bitflag: number;
     ref: ComponentRef;
     queries: Set<Query>;
+    targetedQueries: Map<any, Set<Query>>;
     setObservable: Observable;
     getObservable: Observable;
 }
