@@ -135,6 +135,21 @@ Coverage: `test/core/TargetedPairTransition.test.ts` › `Specific-target querie
 archetype edges valid`. The version test fails before the patch; the seeded 3,000-step differential
 with targeted queries registered, removed and evicted between operations passes before and after.
 
+## 5. `src/core/Entity.ts`, `src/core/Component.ts` — `removeEntity` walks a copy of the component list
+
+`removeEntity` walked the live `ctx.entityComponents[eid]` array while removing the entity from each
+component's queries, and `removeEntityPairs` walked the same array. `queryRemoveEntity` fires
+`onRemove` observers synchronously inside that loop, and an observer may still remove components from
+the dying entity, since it is alive until `removeEntityId`. `removeComponent` swap-removes from that
+array, moving the last component into the removed slot. If that slot was behind the loop cursor, the
+moved component was never visited. Its queries kept the freed eid, so the next
+`removeComponent(world, eid, ...)` on a query result threw `entity does not exist`.
+
+In the game, a seated player disconnects: `onRemove(InteractingWith(Wildcard))` removes `Stance`, which
+was added earlier than the interaction, and the newest status effect moves into its slot and is skipped.
+
+Coverage: `test/core/RemoveEntityObserverMutation.test.ts`. Both cases fail before the patch.
+
 ## Working on this fork
 
 ```bash

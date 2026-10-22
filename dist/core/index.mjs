@@ -1402,7 +1402,7 @@ var updatePairQueries = (world, ctx, eid, relation, target, isAdd) => {
   }
 };
 var removeEntityPairs = (world, ctx, eid) => {
-  const comps = ctx.entityComponents[eid];
+  const comps = ctx.entityComponents[eid]?.slice();
   if (!comps) return;
   for (let i = 0; i < comps.length; i++) {
     const component = comps[i];
@@ -1630,7 +1630,7 @@ var removeEntity = (world, eid) => {
       for (let i = 0; i < deferredOps.length; i++) deferredOps[i]();
     }
     removeEntityPairs(world, ctx, currentEid);
-    const components = ctx.entityComponents[currentEid];
+    const components = ctx.entityComponents[currentEid]?.slice();
     if (components) {
       const visited = /* @__PURE__ */ new Set();
       for (let i = 0; i < components.length; i++) {

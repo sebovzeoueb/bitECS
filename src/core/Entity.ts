@@ -99,7 +99,8 @@ export const removeEntity = (world: World, eid: EntityId) => {
 		removeEntityPairs(world, ctx, currentEid)
 
 		// Remove entity from affected queries (via entity's component set)
-		const components = ctx.entityComponents[currentEid]
+		// A copy: onRemove observers fire inside this loop and may swap-remove the entity's own components
+		const components = ctx.entityComponents[currentEid]?.slice()
 		if (components) {
 			const visited = new Set<any>()
 			for (let i = 0; i < components.length; i++) {

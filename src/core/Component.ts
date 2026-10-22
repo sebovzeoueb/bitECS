@@ -544,7 +544,8 @@ const updatePairQueries = (world: World, ctx: WorldContext, eid: EntityId, relat
  * handled separately by removeEntity's cascade.
  */
 export const removeEntityPairs = (world: World, ctx: WorldContext, eid: EntityId) => {
-	const comps = ctx.entityComponents[eid]
+	// A copy: observers fired from updatePairQueries may swap-remove the entity's own components
+	const comps = ctx.entityComponents[eid]?.slice()
 	if (!comps) return
 	for (let i = 0; i < comps.length; i++) {
 		const component = comps[i]
